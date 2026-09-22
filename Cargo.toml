@@ -1,0 +1,35 @@
+[package]
+name = "simpcky"
+version = "0.1.0"
+edition = "2021"
+description = "Notas adhesivas ultraligeras para el escritorio de Windows"
+
+[[bin]]
+name = "simpcky"
+path = "src/main.rs"
+
+[dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Com",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_UI_Controls",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_GdiPlus",
+    "Win32_Graphics_Dwm",
+    "Win32_System_Registry",
+    "Win32_Security",
+    "Win32_UI_HiDpi",
+] }
+
+# Binario pequeño: sin símbolos de depuración, una sola unidad de
+# codegen, LTO completo y aborto directo en pánico (nada de unwinding).
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
