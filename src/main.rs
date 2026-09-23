@@ -19,6 +19,8 @@ mod shell;
 mod sync;
 mod theme;
 mod tray;
+mod update;
+mod welcome;
 mod win;
 
 use std::ptr::{null, null_mut};
@@ -26,7 +28,8 @@ use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, HINSTANCE, HWND, POINT};
 use windows_sys::Win32::Graphics::GdiPlus::{GdiplusStartup, GdiplusStartupInput};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Threading::{CreateMutexW, Sleep};
+use windows_sys::Win32::Foundation::CloseHandle;
+use windows_sys::Win32::System::Threading::{CreateMutexW, OpenProcess, Sleep, WaitForSingleObject, PROCESS_SYNCHRONIZE};
 use windows_sys::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW, GetWindowThreadProcessId,
@@ -47,13 +50,26 @@ fn main() {
     // `--new`: lo manda "Nueva nota adhesiva" del clic derecho del
     // escritorio (ver `shell.rs`).
     let want_new = std::env::args().skip(1).any(|a| a == "--new");
+    // `--quit`: lo usa el instalador (y el desinstalador) para cerrar la
+    // app abierta de forma ordenada — guardando lo que se esté
+    // escribiendo — antes de reemplazar o borrar el .exe.
+    let want_quit = std::env::args().skip(1).any(|a| a == "--quit");
+    // `--welcome`: abrir la bienvenida aunque no sea la primera vez.
+    let want_welcome = std::env::args().skip(1).any(|a| a == "--welcome");
 
     // Una sola instancia. Una segunda copia cargaría las mismas notas
     // otra vez (todas duplicadas en pantalla) y las dos se pisarían al
     // guardar. Si ya hay una corriendo, se le pasa el pedido y listo.
     if !claim_single_instance() {
-        forward_to_running_instance(want_new);
+        if want_quit {
+            quit_running_instance();
+        } else {
+            forward_to_running_instance(want_new);
+        }
         return;
+    }
+    if want_quit {
+        return; // no había ninguna abierta: nada que cerrar
     }
 
     unsafe {
@@ -100,6 +116,7 @@ fn main() {
     note::register_class(hinstance);
     tray::register_class(hinstance);
     allnotes::register_class(hinstance);
+    welcome::register_class(hinstance);
 
     load_or_create_notes();
     // Lo que se acaba de cargar es el punto de partida para detectar
@@ -110,6 +127,13 @@ fn main() {
     save_all();
     tray::init(hinstance);
     sync::on_startup();
+    update::on_startup();
+
+    // Primera vez en esta compu (no había ajustes guardados): la
+    // bienvenida, con lo que conviene decidir de entrada.
+    if first_settings || want_welcome {
+        welcome::show();
+    }
 
     if want_new {
         // La app no estaba abierta y la arrancó el clic derecho del
@@ -158,18 +182,8 @@ fn claim_single_instance() -> bool {
 /// nueva donde está el cursor (`--new`) o, si se abrió el .exe a
 /// secas, la ventana "Todas las notas".
 fn forward_to_running_instance(want_new: bool) {
-    let class = wide(tray::CONTROLLER_CLASS);
+    let controller = find_controller();
     unsafe {
-        // Si la otra instancia está arrancando justo ahora, su ventana
-        // controladora puede tardar un momento en existir.
-        let mut controller: HWND = null_mut();
-        for _ in 0..30 {
-            controller = FindWindowW(class.as_ptr(), null());
-            if !controller.is_null() {
-                break;
-            }
-            Sleep(100);
-        }
         if controller.is_null() {
             return;
         }
@@ -186,6 +200,42 @@ fn forward_to_running_instance(want_new: bool) {
             PostMessageW(controller, tray::WM_APP_NEW_AT, pt.x as isize as usize, pt.y as isize);
         } else {
             PostMessageW(controller, tray::WM_APP_SHOW_ALL, 0, 0);
+        }
+    }
+}
+
+/// La ventana controladora de la instancia que ya está corriendo (con
+/// un poco de espera, por si justo está arrancando).
+fn find_controller() -> HWND {
+    let class = wide(tray::CONTROLLER_CLASS);
+    unsafe {
+        for _ in 0..30 {
+            let controller = FindWindowW(class.as_ptr(), null());
+            if !controller.is_null() {
+                return controller;
+            }
+            Sleep(100);
+        }
+    }
+    null_mut()
+}
+
+/// `--quit`: le pide a la instancia abierta que guarde y se cierre, y
+/// espera (hasta 10 s) a que su proceso termine de verdad, para que el
+/// instalador encuentre el .exe libre.
+fn quit_running_instance() {
+    let controller = find_controller();
+    if controller.is_null() {
+        return;
+    }
+    unsafe {
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(controller, &mut pid);
+        let process = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+        PostMessageW(controller, tray::WM_APP_QUIT, 0, 0);
+        if !process.is_null() {
+            WaitForSingleObject(process, 10_000);
+            CloseHandle(process);
         }
     }
 }

@@ -499,6 +499,7 @@ Ver docs/sincronizacion-google.md para configurarla.",
         }
     });
     crate::tray::notify("Conectar con Google Drive", "Se abrió el navegador: iniciá sesión con tu cuenta de Google ahí.");
+    crate::welcome::refresh();
 }
 
 pub fn cancel_sign_in() {
@@ -510,6 +511,7 @@ pub fn cancel_sign_in() {
 pub fn on_sign_in_done(lparam: isize) {
     let result = *unsafe { Box::from_raw(lparam as *mut Result<String, String>) };
     RT.lock().unwrap().signing_in = None;
+    crate::welcome::refresh();
     match result {
         Ok(email) => {
             let state = {

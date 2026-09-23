@@ -34,6 +34,8 @@ pub const WM_APP_NEW_AT: u32 = WM_APP + 2;
 /// Otra instancia (lanzada sin argumentos: doble clic en el .exe con
 /// la app ya abierta) pide mostrar "Todas las notas".
 pub const WM_APP_SHOW_ALL: u32 = WM_APP + 3;
+/// Otra instancia lanzada con `--quit` (el instalador) pide cerrar.
+pub const WM_APP_QUIT: u32 = WM_APP + 5;
 /// Alguna nota se quedó sin ventana (ver `note::on_destroy`).
 const WM_APP_RECREATE: u32 = WM_APP + 4;
 const TRAY_UID: u32 = 1;
@@ -51,6 +53,8 @@ const ID_SYNC_CONNECT: u32 = 1010;
 const ID_SYNC_NOW: u32 = 1011;
 const ID_SYNC_DISCONNECT: u32 = 1012;
 const ID_SYNC_CANCEL: u32 = 1013;
+const ID_UPDATE_INSTALL: u32 = 1020;
+const ID_UPDATE_CHECK: u32 = 1021;
 
 fn taskbar_created_msg() -> u32 {
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -147,9 +151,24 @@ fn add_tray_icon(hwnd: HWND) {
     }
 }
 
+/// Qué hacer si el usuario hace clic en la notificación que se está
+/// mostrando (solo algunas tienen acción: "hay una versión nueva").
+static BALLOON_ACTION: std::sync::Mutex<Option<fn()>> = std::sync::Mutex::new(None);
+
 /// Aviso tipo globo desde el ícono de la bandeja (Windows lo muestra
 /// como notificación del sistema).
 pub fn notify(title: &str, text: &str) {
+    *BALLOON_ACTION.lock().unwrap() = None;
+    show_balloon(title, text);
+}
+
+/// Como `notify`, pero con algo que hacer si le hacen clic.
+pub fn notify_action(title: &str, text: &str, action: fn()) {
+    *BALLOON_ACTION.lock().unwrap() = Some(action);
+    show_balloon(title, text);
+}
+
+fn show_balloon(title: &str, text: &str) {
     let hwnd = { app().lock().unwrap().controller_hwnd } as HWND;
     if hwnd.is_null() {
         return;
@@ -276,6 +295,15 @@ fn show_tray_menu(hwnd: HWND) {
         // las preferencias y salir.
         let menu = CreatePopupMenu();
 
+        // Una actualización pendiente va primero y en negrita: es lo
+        // único del menú que el usuario no sabe que existe.
+        if let Some(v) = crate::update::available() {
+            let label = wide(&format!("Actualizar a la versión {}…", crate::update::version_text(v)));
+            AppendMenuW(menu, MF_STRING, ID_UPDATE_INSTALL as usize, label.as_ptr());
+            SetMenuDefaultItem(menu, ID_UPDATE_INSTALL, 0);
+            AppendMenuW(menu, MF_SEPARATOR, 0, null());
+        }
+
         let new_note = wide("Nueva nota\tCtrl+N");
         AppendMenuW(menu, MF_STRING, ID_NEW_NOTE as usize, new_note.as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
@@ -302,6 +330,12 @@ fn show_tray_menu(hwnd: HWND) {
         append_check(menu, ID_DARK_MODE, "Modo oscuro", crate::theme::is_dark());
         append_check(menu, ID_DESKTOP_MENU, "\"Nueva nota\" en el clic derecho del escritorio", desktop_menu);
         append_check(menu, ID_AUTOSTART, "Iniciar con Windows", autostart_on);
+        AppendMenuW(menu, MF_SEPARATOR, 0, null());
+
+        let about = wide(&format!("Simpcky {}", crate::update::version_text(crate::update::current())));
+        AppendMenuW(menu, MF_STRING | MF_DISABLED | MF_GRAYED, 0, about.as_ptr());
+        let check = wide("Buscar actualizaciones");
+        AppendMenuW(menu, MF_STRING, ID_UPDATE_CHECK as usize, check.as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
 
         let exit_label = wide("Salir");
@@ -349,7 +383,7 @@ fn set_default_roll_mode(mode: RollMode) {
     save_settings();
 }
 
-fn toggle_desktop_menu() {
+pub fn toggle_desktop_menu() {
     let enable = {
         let mut a = app().lock().unwrap();
         a.settings.desktop_menu = !a.settings.desktop_menu;
@@ -366,6 +400,14 @@ fn toggle_desktop_menu() {
 /// Salir de verdad: guardar todo, sacar el icono, terminar el bucle de
 /// mensajes. Las ventanas de las notas se van con el proceso (sin
 /// WM_DESTROY), así que sus datos quedan intactos en disco.
+/// Salir, desde otro módulo (el actualizador, antes de instalar).
+pub fn quit_app() {
+    let hwnd = { app().lock().unwrap().controller_hwnd } as HWND;
+    if !hwnd.is_null() {
+        exit_app(hwnd);
+    }
+}
+
 fn exit_app(hwnd: HWND) {
     crate::app::set_shutting_down();
     note::flush_all();
@@ -386,6 +428,8 @@ fn handle_command(hwnd: HWND, id: u32) {
         ID_SYNC_NOW => crate::sync::sync_now(),
         ID_SYNC_DISCONNECT => crate::sync::disconnect(),
         ID_SYNC_CANCEL => crate::sync::cancel_sign_in(),
+        ID_UPDATE_INSTALL => crate::update::install(),
+        ID_UPDATE_CHECK => crate::update::check_now(),
         _ => {}
     }
 }
@@ -402,6 +446,15 @@ unsafe extern "system" fn controller_wndproc(hwnd: HWND, msg: u32, wparam: WPARA
                     spawn_new_note();
                 }
                 WM_RBUTTONUP => show_tray_menu(hwnd),
+                NIN_BALLOONUSERCLICK => {
+                    let action = BALLOON_ACTION.lock().unwrap().take();
+                    if let Some(action) = action {
+                        action();
+                    }
+                }
+                NIN_BALLOONTIMEOUT | NIN_BALLOONHIDE => {
+                    *BALLOON_ACTION.lock().unwrap() = None;
+                }
                 _ => {}
             }
             0
@@ -432,6 +485,18 @@ unsafe extern "system" fn controller_wndproc(hwnd: HWND, msg: u32, wparam: WPARA
             crate::sync::on_sign_in_done(lparam);
             0
         }
+        crate::update::WM_APP_UPDATE_CHECKED => {
+            crate::update::on_checked(wparam, lparam);
+            0
+        }
+        crate::update::WM_APP_UPDATE_DOWNLOADED => {
+            crate::update::on_downloaded(lparam);
+            0
+        }
+        WM_TIMER if wparam == crate::update::TIMER_UPDATE_CHECK => {
+            crate::update::on_timer();
+            0
+        }
         WM_TIMER if wparam == crate::sync::TIMER_SYNC_SOON || wparam == crate::sync::TIMER_SYNC_POLL => {
             crate::sync::on_timer(wparam);
             0
@@ -449,7 +514,17 @@ unsafe extern "system" fn controller_wndproc(hwnd: HWND, msg: u32, wparam: WPARA
             if wparam != 0 {
                 crate::app::set_shutting_down();
                 note::flush_all();
+                // ENDSESSION_CLOSEAPP: no es Windows apagándose sino un
+                // instalador que necesita el .exe libre (Restart
+                // Manager). Ahí hay que cerrarse de verdad.
+                if lparam as u32 & ENDSESSION_CLOSEAPP != 0 {
+                    DestroyWindow(hwnd);
+                }
             }
+            0
+        }
+        WM_APP_QUIT => {
+            exit_app(hwnd);
             0
         }
         WM_DESTROY => {

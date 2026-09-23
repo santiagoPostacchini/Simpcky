@@ -3,8 +3,19 @@
 Notas adhesivas ultraligeras para el escritorio de Windows 11. Rust +
 Win32 puro (`windows-sys`), sin Electron, sin WebView2, sin .NET.
 
-Diseño: ver el lienzo publicado — cinco pantallas (escritorio, prototipo
-interactivo, anatomía, menús, especificación técnica).
+Sitio: <https://santiagopostacchini.github.io/Simpcky/> ·
+[Política de privacidad](https://santiagopostacchini.github.io/Simpcky/privacidad.html) ·
+Licencia [MIT](LICENSE).
+
+## Instalar
+
+Bajá `Simpcky-Setup-X.Y.Z.exe` del [último release](https://github.com/santiagoPostacchini/Simpcky/releases/latest)
+y abrilo. Se instala para tu usuario (sin permisos de administrador) en
+`%LOCALAPPDATA%\Programs\Simpcky`, y se actualiza sola: una vez por día
+mira si hay una versión nueva, te avisa, y al aceptar baja el
+instalador, verifica su huella SHA-256 y se reinstala sin cerrar tus
+notas más que un segundo. Para publicar una versión nueva, ver
+[`docs/publicar-version.md`](docs/publicar-version.md).
 
 ## Compilar y ejecutar
 
@@ -16,7 +27,7 @@ cargo build --release
 En debug (`cargo run`) el binario abre una consola detrás; en release no
 (`#![windows_subsystem = "windows"]`).
 
-## Estado actual (v0.1 — primer corte funcional)
+## Estado actual (v0.3)
 
 Ya funciona:
 
@@ -137,8 +148,17 @@ Ya funciona:
 - Persistencia en `%APPDATA%\Simpcky\notes.json`, con autoguardado
   (debounce ~600 ms al escribir; inmediato al mover/cambiar ajustes),
   y las preferencias en `settings.json` al lado.
-- Primera ejecución: crea una nota de bienvenida que explica el modo
+- Primera ejecución: una **pantalla de bienvenida** (iniciar con
+  Windows, el clic derecho del escritorio, el tema, y la sincronización
+  con Google como opción), y una nota de bienvenida que explica el modo
   Manual/Auto, el renombrado y cómo crear más.
+- **Instalador** (Inno Setup, `installer/simpcky.iss`): para el usuario,
+  sin administrador; cierra la app de forma ordenada antes de
+  reemplazarla (`simpcky.exe --quit`); al desinstalar limpia el registro
+  y pregunta si borrar las notas.
+- **Actualizaciones** desde los Releases de GitHub (`src/update.rs`),
+  con verificación de la huella del instalador. Los releases los arma
+  GitHub Actions al subir un tag (`.github/workflows/release.yml`).
 
 Medido en esta máquina: binario de **~256 KB** con el ícono embebido
 (release, LTO, strip, `panic=abort`); con ocho notas abiertas, 3,8 MB
@@ -198,8 +218,12 @@ se vería pero no se podría escribir ni arrastrar.
 
 ## Estructura
 
-- `build.rs` — embebe en el `.exe` el ícono (`assets/simpcky.ico`) y
-  el manifiesto (Windows 8+ y Common Controls 6).
+- `build.rs` — embebe en el `.exe` el ícono (`assets/simpcky.ico`), el
+  manifiesto (Windows 8+ y Common Controls 6), la ficha de versión y el
+  cliente de Google.
+- `installer/simpcky.iss` — el instalador.
+- `.github/workflows/release.yml` — compila y publica cada versión.
+- `docs/` — el sitio (GitHub Pages) y las guías.
 - `src/main.rs` — arranque, instancia única (`--new`), ajustes, carga de
   notas, bucle de mensajes y atajos.
 - `src/app.rs` — estado global (notas abiertas, ajustes).
@@ -217,6 +241,8 @@ se vería pero no se podría escribir ni arrastrar.
 - `src/http.rs` — cliente HTTPS mínimo sobre WinHTTP.
 - `src/crypto.rs` — azar, SHA-256, base64url y DPAPI (todo de Windows).
 - `src/json.rs` — lector/escritor de JSON a mano.
+- `src/update.rs` — buscar, bajar, verificar e instalar versiones nuevas.
+- `src/welcome.rs` — la pantalla de bienvenida.
 - `src/rename.rs` — el cuadro para cambiarle el nombre a una nota.
 - `src/ghost.rs` — la mini nota que sigue al cursor al arrastrar una
   tarjeta al escritorio.

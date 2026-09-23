@@ -137,10 +137,7 @@ pub fn show() {
     let existing = state().lock().unwrap().hwnd;
     if existing != 0 {
         let hwnd = existing as HWND;
-        unsafe {
-            ShowWindow(hwnd, SW_SHOWNORMAL);
-            SetForegroundWindow(hwnd);
-        }
+        crate::win::show_normal(hwnd);
         refresh_list(hwnd);
         return;
     }
@@ -170,10 +167,7 @@ pub fn show() {
         // ventana, si no se ve un destello blanco.
         theme::apply_title_bar(hwnd);
         theme::apply_scrollbars(hwnd);
-        unsafe {
-            ShowWindow(hwnd, SW_SHOWNORMAL);
-            SetForegroundWindow(hwnd);
-        }
+        crate::win::show_normal(hwnd);
     }
 }
 

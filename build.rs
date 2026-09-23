@@ -169,5 +169,96 @@ fn build_res(ico: &[u8]) -> Vec<u8> {
     }
     push_resource(&mut res, RT_GROUP_ICON, ICON_GROUP_ID, &group);
     push_resource(&mut res, RT_MANIFEST, MANIFEST_ID, MANIFEST.as_bytes());
+    push_resource(&mut res, RT_VERSION, 1, &version_info());
     res
+}
+
+// ---------------------------------------------------------------------
+// Ficha de versión (Propiedades → Detalles del .exe)
+// ---------------------------------------------------------------------
+
+const RT_VERSION: u16 = 16;
+/// Español (0x0C0A) + UTF-16 (1200 = 0x04B0).
+const LANG: u16 = 0x0C0A;
+const CODEPAGE: u16 = 0x04B0;
+
+fn utf16z(s: &str) -> Vec<u8> {
+    s.encode_utf16().chain(std::iter::once(0)).flat_map(|c| c.to_le_bytes()).collect()
+}
+
+fn pad4(b: &mut Vec<u8>) {
+    while b.len() % 4 != 0 {
+        b.push(0);
+    }
+}
+
+/// Un nodo del árbol VS_VERSIONINFO: largo, largo del valor, tipo
+/// (0 binario, 1 texto), clave, valor y nodos hijos, todo alineado a 4.
+fn vs_node(key: &str, value: &[u8], value_len: u16, text: bool, children: &[Vec<u8>]) -> Vec<u8> {
+    let mut b = vec![0, 0];
+    b.extend_from_slice(&value_len.to_le_bytes());
+    b.extend_from_slice(&(text as u16).to_le_bytes());
+    b.extend_from_slice(&utf16z(key));
+    pad4(&mut b);
+    b.extend_from_slice(value);
+    for child in children {
+        pad4(&mut b);
+        b.extend_from_slice(child);
+    }
+    let len = b.len() as u16;
+    b[0..2].copy_from_slice(&len.to_le_bytes());
+    b
+}
+
+fn version_info() -> Vec<u8> {
+    let num = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+    let (major, minor, patch) = (num("CARGO_PKG_VERSION_MAJOR"), num("CARGO_PKG_VERSION_MINOR"), num("CARGO_PKG_VERSION_PATCH"));
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+
+    // VS_FIXEDFILEINFO
+    let mut fixed = Vec::new();
+    for v in [
+        0xFEEF_04BDu32,             // firma
+        0x0001_0000,                // versión de la estructura
+        (major << 16) | minor,      // versión de archivo
+        patch << 16,
+        (major << 16) | minor,      // versión de producto
+        patch << 16,
+        0x3F,                       // máscara de flags
+        0,                          // flags
+        0x0004_0004,                // VOS_NT_WINDOWS32
+        1,                          // VFT_APP
+        0,
+        0,
+        0,
+    ] {
+        fixed.extend_from_slice(&v.to_le_bytes());
+    }
+
+    let strings: Vec<Vec<u8>> = [
+        ("CompanyName", "Simpcky"),
+        ("FileDescription", "Simpcky — notas adhesivas"),
+        ("FileVersion", version.as_str()),
+        ("InternalName", "simpcky"),
+        ("LegalCopyright", "© 2026 Santiago Postacchini. Licencia MIT."),
+        ("OriginalFilename", "simpcky.exe"),
+        ("ProductName", "Simpcky"),
+        ("ProductVersion", version.as_str()),
+    ]
+    .iter()
+    .map(|(k, v)| {
+        let value = utf16z(v);
+        vs_node(k, &value, (value.len() / 2) as u16, true, &[])
+    })
+    .collect();
+    let table = vs_node(&format!("{LANG:04X}{CODEPAGE:04X}"), &[], 0, true, &strings);
+    let string_info = vs_node("StringFileInfo", &[], 0, true, &[table]);
+
+    let mut translation = Vec::new();
+    translation.extend_from_slice(&LANG.to_le_bytes());
+    translation.extend_from_slice(&CODEPAGE.to_le_bytes());
+    let var = vs_node("Translation", &translation, 4, false, &[]);
+    let var_info = vs_node("VarFileInfo", &[], 0, true, &[var]);
+
+    vs_node("VS_VERSION_INFO", &fixed, fixed.len() as u16, false, &[string_info, var_info])
 }

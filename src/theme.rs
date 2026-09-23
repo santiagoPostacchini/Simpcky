@@ -40,6 +40,7 @@ pub fn set_dark(dark: bool) {
     crate::app::save_settings();
     crate::note::apply_theme_all();
     crate::allnotes::apply_theme();
+    crate::welcome::refresh();
 }
 
 /// Lo que tiene elegido Windows para las apps (Configuración →
