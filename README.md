@@ -130,8 +130,10 @@ Ya funciona:
   nunca se pierde por algo que pasó en otra. Todo con lo que trae
   Windows (WinHTTP, CNG, DPAPI), sin bibliotecas nuevas. Cubierto por
   tests (`cargo test`; los que usan la red real, con
-  `cargo test -- --ignored`); **falta la prueba de punta a punta con una
-  cuenta real**, que necesita el cliente de Google.
+  `cargo test -- --ignored`), y probado de punta a punta con una cuenta
+  real: la subida coincide byte a byte con lo esperado (MD5 de Drive),
+  una compu nueva recibe las notas con su identidad y posición, y una
+  compu con una versión vieja se corrige sola sin volver a subirla.
 - Persistencia en `%APPDATA%\Simpcky\notes.json`, con autoguardado
   (debounce ~600 ms al escribir; inmediato al mover/cambiar ajustes),
   y las preferencias en `settings.json` al lado.
