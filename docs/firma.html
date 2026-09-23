@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Política de firma de código — Simpcky</title>
+<meta name="description" content="Cómo se firman los programas de Simpcky, quién aprueba cada firma y a qué se conecta la app.">
+<link rel="icon" type="image/png" href="assets/favicon.png">
+<link rel="stylesheet" href="assets/estilo.css">
+</head>
+<body>
+<div class="wrap">
+
+  <header class="site">
+    <img src="assets/icono.png" alt="" width="48" height="48">
+    <a class="brand" href="./">Simpcky</a>
+    <nav>
+      <a href="#english">English</a>
+      <a data-gh="" href="https://github.com/">GitHub</a>
+    </nav>
+  </header>
+
+  <main>
+    <h1>Política de firma de código</h1>
+
+    <div class="note" style="margin: 24px 0 8px"><div class="bar"></div><div class="body">
+      <p>
+        Las versiones firmadas de Simpcky usan firma de código gratuita
+        provista por <a href="https://about.signpath.io/">SignPath.io</a>,
+        con certificado de <a href="https://signpath.org/">SignPath Foundation</a>.
+        Las versiones hasta la 0.3.0 no están firmadas.
+      </p>
+    </div></div>
+
+    <h2>Qué se firma</h2>
+    <p>
+      Solo los programas que GitHub Actions compila, en los servidores de
+      GitHub, a partir del código de este
+      <a data-gh="" href="https://github.com/">repositorio público</a>:
+      <code>simpcky.exe</code> y su instalador <code>Simpcky-Setup-X.Y.Z.exe</code>.
+      Nada que no salga de ese código se firma con este certificado. Cada
+      pedido de firma lo aprueba a mano una de las personas de la lista de
+      aprobadores.
+    </p>
+
+    <h2>Equipo y roles</h2>
+    <table>
+      <thead><tr><th>Rol</th><th>Quiénes</th></tr></thead>
+      <tbody>
+        <tr><td>Autores y revisores (pueden cambiar el código y revisan los aportes de otras personas)</td><td><a href="https://github.com/santiagoPostacchini">Santiago Postacchini</a></td></tr>
+        <tr><td>Aprobadores (autorizan cada firma)</td><td><a href="https://github.com/santiagoPostacchini">Santiago Postacchini</a></td></tr>
+      </tbody>
+    </table>
+    <p>Todas las personas del equipo usan verificación en dos pasos en GitHub y en SignPath.</p>
+
+    <h2>Privacidad</h2>
+    <p>
+      Simpcky no envía información a otros sistemas salvo que quien lo usa
+      lo pida. Se conecta a internet solo para dos cosas, las dos
+      avisadas y con su interruptor:
+    </p>
+    <ul>
+      <li><strong>Sincronizar con Google Drive</strong>, solo si conectás tu cuenta de Google.</li>
+      <li><strong>Buscar actualizaciones</strong> en GitHub una vez por día. Se puede apagar en la pantalla de bienvenida o en el menú de la bandeja.</li>
+    </ul>
+    <p>Todos los detalles: <a href="privacidad.html">política de privacidad</a>.</p>
+
+    <hr style="border: none; border-top: 1px solid var(--line); margin: 56px 0 8px">
+
+    <section id="english" lang="en">
+      <h1>Code signing policy</h1>
+      <p>
+        Signed releases of Simpcky use free code signing provided by
+        <a href="https://about.signpath.io/">SignPath.io</a>, certificate by
+        <a href="https://signpath.org/">SignPath Foundation</a>.
+        Releases up to 0.3.0 are not signed.
+      </p>
+
+      <h2>What gets signed</h2>
+      <p>
+        Only the programs built by GitHub Actions, on GitHub-hosted runners,
+        from the source code in this
+        <a data-gh="" href="https://github.com/">public repository</a>:
+        <code>simpcky.exe</code> and its installer
+        <code>Simpcky-Setup-X.Y.Z.exe</code>. Nothing that is not built from
+        that source is signed with this certificate. Every signing request is
+        manually approved by an approver listed below.
+      </p>
+
+      <h2>Team roles and their members</h2>
+      <ul>
+        <li>Committers and reviewers: <a href="https://github.com/santiagoPostacchini">Santiago Postacchini</a></li>
+        <li>Approvers: <a href="https://github.com/santiagoPostacchini">Santiago Postacchini</a></li>
+      </ul>
+      <p>All team members use multi-factor authentication on GitHub and SignPath.</p>
+
+      <h2>Privacy policy</h2>
+      <p>
+        This program will not transfer any information to other networked
+        systems unless specifically requested by the user or the person
+        installing or operating it. It connects to the internet only to
+        sync notes with Google Drive (only if the user connects their Google
+        account) and to check GitHub for updates once a day (can be turned off
+        in the welcome screen or the tray menu). See the full
+        <a href="privacidad.html#english">privacy policy</a>.
+      </p>
+    </section>
+  </main>
+
+  <footer class="site">
+    <span>© 2026 Simpcky</span>
+    <a href="./">Inicio</a>
+    <a href="privacidad.html">Política de privacidad</a>
+    <a data-gh="" href="https://github.com/">GitHub</a>
+  </footer>
+
+</div>
+<script>
+  // Enlaces al repositorio a partir de USUARIO.github.io (ver index.html).
+  (function () {
+    var m = /^([^.]+)\.github\.io$/.exec(location.hostname);
+    if (!m) return;
+    var repo = 'https://github.com/' + m[1] + '/' + (location.pathname.split('/')[1] || 'simpcky');
+    document.querySelectorAll('[data-gh]').forEach(function (a) {
+      a.href = repo + a.getAttribute('data-gh');
+    });
+  })();
+</script>
+</body>
+</html>

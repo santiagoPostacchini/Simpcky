@@ -95,6 +95,7 @@ fn main() {
         dark: theme::system_prefers_dark(),
         default_roll_mode: RollMode::Manual,
         desktop_menu: true,
+        auto_update: true,
     });
     theme::init(settings.dark);
 

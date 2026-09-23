@@ -15,7 +15,9 @@ y abrilo. Se instala para tu usuario (sin permisos de administrador) en
 mira si hay una versión nueva, te avisa, y al aceptar baja el
 instalador, verifica su huella SHA-256 y se reinstala sin cerrar tus
 notas más que un segundo. Para publicar una versión nueva, ver
-[`docs/publicar-version.md`](docs/publicar-version.md).
+[`docs/publicar-version.md`](docs/publicar-version.md); la firma digital
+(SignPath Foundation), en [`docs/firma-signpath.md`](docs/firma-signpath.md)
+y la [política de firma](https://santiagopostacchini.github.io/Simpcky/firma.html).
 
 ## Compilar y ejecutar
 

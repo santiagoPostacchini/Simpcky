@@ -55,12 +55,13 @@ cargo build --release
 Queda en `dist\Simpcky-Setup-X.Y.Z.exe`. Para probar una actualización
 como la hace la app: `Simpcky-Setup-X.Y.Z.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /RELAUNCH`.
 
-## Sobre la firma digital
+## Firma digital
 
-El instalador todavía no está firmado, así que Windows SmartScreen (y
-algunos antivirus) lo miran con desconfianza la primera vez: "Windows
-protegió tu PC" → *Más información* → *Ejecutar de todas formas*. Firmarlo
-necesita un certificado de firma de código; para un proyecto de código
-abierto hay opciones gratuitas o baratas (por ejemplo SignPath para
-proyectos open source, o Azure Trusted Signing). Se agrega como un paso
-más del workflow.
+Las versiones se firman con SignPath Foundation (gratis para código
+abierto) apenas el proyecto quede aceptado: ver
+[`firma-signpath.md`](firma-signpath.md). Mientras tanto salen sin firmar,
+y Windows SmartScreen puede mostrar "Windows protegió tu PC" →
+*Más información* → *Ejecutar de todas formas*. Firmar no borra ese aviso
+de un día para el otro (desde 2024 ni los certificados EV lo hacen): la
+reputación se gana con descargas, pero con firma se acumula de una versión
+a la otra.

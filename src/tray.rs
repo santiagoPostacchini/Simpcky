@@ -55,6 +55,7 @@ const ID_SYNC_DISCONNECT: u32 = 1012;
 const ID_SYNC_CANCEL: u32 = 1013;
 const ID_UPDATE_INSTALL: u32 = 1020;
 const ID_UPDATE_CHECK: u32 = 1021;
+const ID_UPDATE_AUTO: u32 = 1022;
 
 fn taskbar_created_msg() -> u32 {
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -336,6 +337,7 @@ fn show_tray_menu(hwnd: HWND) {
         AppendMenuW(menu, MF_STRING | MF_DISABLED | MF_GRAYED, 0, about.as_ptr());
         let check = wide("Buscar actualizaciones");
         AppendMenuW(menu, MF_STRING, ID_UPDATE_CHECK as usize, check.as_ptr());
+        append_check(menu, ID_UPDATE_AUTO, "Buscar actualizaciones automáticamente", crate::update::is_auto());
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
 
         let exit_label = wide("Salir");
@@ -430,6 +432,7 @@ fn handle_command(hwnd: HWND, id: u32) {
         ID_SYNC_CANCEL => crate::sync::cancel_sign_in(),
         ID_UPDATE_INSTALL => crate::update::install(),
         ID_UPDATE_CHECK => crate::update::check_now(),
+        ID_UPDATE_AUTO => crate::update::toggle_auto(),
         _ => {}
     }
 }

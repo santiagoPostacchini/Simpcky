@@ -308,6 +308,10 @@ pub struct Settings {
     pub default_roll_mode: RollMode,
     /// "Nueva nota adhesiva" en el menú del clic derecho del escritorio.
     pub desktop_menu: bool,
+    /// Buscar versiones nuevas en GitHub una vez por día (ver
+    /// `update.rs`). Se puede apagar: la app no se conecta a nada que
+    /// el usuario no haya elegido.
+    pub auto_update: bool,
 }
 
 fn settings_path() -> PathBuf {
@@ -322,6 +326,7 @@ pub fn load_settings() -> Option<Settings> {
         dark: j.bool_or("dark", false),
         default_roll_mode: RollMode::from_u8(j.u8_or("defaultRollMode", 0)),
         desktop_menu: j.bool_or("desktopMenu", true),
+        auto_update: j.bool_or("autoUpdate", true),
     })
 }
 
@@ -330,10 +335,11 @@ pub fn save_settings(s: &Settings) {
         return;
     }
     let json = format!(
-        "{{\"dark\":{},\"defaultRollMode\":{},\"desktopMenu\":{}}}\n",
+        "{{\"dark\":{},\"defaultRollMode\":{},\"desktopMenu\":{},\"autoUpdate\":{}}}\n",
         s.dark,
         s.default_roll_mode.as_u8(),
-        s.desktop_menu
+        s.desktop_menu,
+        s.auto_update
     );
     write_atomic(&settings_path(), &json);
 }

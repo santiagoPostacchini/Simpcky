@@ -165,13 +165,44 @@ fn in_background<T: Send + 'static>(msg: u32, wparam: usize, work: impl FnOnce()
 // Lo que ve el resto de la app
 // -----------------------------------------------------------------
 
+fn auto_enabled() -> bool {
+    app().lock().unwrap().settings.auto_update
+}
+
 pub fn on_startup() {
-    if !is_dev_build() {
+    if !is_dev_build() && auto_enabled() {
         unsafe { SetTimer(controller(), TIMER_UPDATE_CHECK, FIRST_CHECK_MS, None) };
     }
 }
 
+/// "Buscar actualizaciones automáticamente" (menú de la bandeja y
+/// bienvenida). Apagado, la app no le consulta nada a GitHub salvo que
+/// se lo pidan con "Buscar actualizaciones".
+pub fn toggle_auto() {
+    let on = {
+        let mut a = app().lock().unwrap();
+        a.settings.auto_update = !a.settings.auto_update;
+        a.settings.auto_update
+    };
+    crate::app::save_settings();
+    unsafe {
+        if on && !is_dev_build() {
+            SetTimer(controller(), TIMER_UPDATE_CHECK, FIRST_CHECK_MS, None);
+        } else {
+            KillTimer(controller(), TIMER_UPDATE_CHECK);
+        }
+    }
+}
+
+pub fn is_auto() -> bool {
+    auto_enabled()
+}
+
 pub fn on_timer() {
+    if !auto_enabled() {
+        unsafe { KillTimer(controller(), TIMER_UPDATE_CHECK) };
+        return;
+    }
     // La primera vez dispara a los 30 s; de ahí en más, una por día.
     unsafe { SetTimer(controller(), TIMER_UPDATE_CHECK, CHECK_EVERY_MS, None) };
     check(false);

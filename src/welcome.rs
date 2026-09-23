@@ -22,11 +22,12 @@ use crate::win::wide;
 
 const CLASS_NAME: &str = "SimpckyWelcome";
 const W: i32 = 460;
-const H: i32 = 560;
+const H: i32 = 604;
 const PAD: i32 = 28;
 const ROW_H: i32 = 44;
 const ROWS_TOP: i32 = 186;
-const CARD_TOP: i32 = ROWS_TOP + 3 * ROW_H + 22;
+const ROWS: i32 = 4;
+const CARD_TOP: i32 = ROWS_TOP + ROWS * ROW_H + 22;
 const CARD_H: i32 = 118;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -34,6 +35,7 @@ enum Hit {
     Autostart,
     DesktopMenu,
     Dark,
+    AutoUpdate,
     Connect,
     Privacy,
     Start,
@@ -163,7 +165,7 @@ fn sync_view() -> SyncView {
 }
 
 fn hit_test(x: i32, y: i32) -> Hit {
-    for (i, hit) in [Hit::Autostart, Hit::DesktopMenu, Hit::Dark].into_iter().enumerate() {
+    for (i, hit) in [Hit::Autostart, Hit::DesktopMenu, Hit::Dark, Hit::AutoUpdate].into_iter().enumerate() {
         if in_rect(&row_rect(i as i32), x, y) {
             return hit;
         }
@@ -297,6 +299,7 @@ fn on_paint(hwnd: HWND) {
             (Hit::Autostart, "Iniciar Simpcky con Windows", autostart),
             (Hit::DesktopMenu, "\"Nueva nota\" en el clic derecho del escritorio", desktop_menu),
             (Hit::Dark, "Modo oscuro", dark),
+            (Hit::AutoUpdate, "Buscar actualizaciones automáticamente", crate::update::is_auto()),
         ];
         for (i, (hit, label, on)) in rows.iter().enumerate() {
             let r = row_rect(i as i32);
@@ -369,6 +372,7 @@ fn on_click(hwnd: HWND, hit: Hit) {
         Hit::Autostart => crate::shell::set_autostart(!crate::shell::is_autostart_enabled()),
         Hit::DesktopMenu => crate::tray::toggle_desktop_menu(),
         Hit::Dark => crate::theme::set_dark(!crate::theme::is_dark()),
+        Hit::AutoUpdate => crate::update::toggle_auto(),
         Hit::Connect => crate::sync::begin_sign_in(),
         Hit::Privacy => open_privacy(),
         Hit::Start => unsafe {

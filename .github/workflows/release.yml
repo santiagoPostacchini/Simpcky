@@ -1,7 +1,8 @@
 # Publica una versión de Simpcky cuando se sube un tag vX.Y.Z:
-# compila, arma el instalador, calcula su huella y crea el release.
-# El actualizador de la app (src/update.rs) baja de acá el instalador y
-# la huella. Ver docs/publicar-version.md.
+# compila, firma (si SignPath está configurado), arma el instalador,
+# calcula su huella y crea el release. El actualizador de la app
+# (src/update.rs) baja de acá el instalador y la huella.
+# Ver docs/publicar-version.md y docs/firma-signpath.md.
 name: Release
 
 on:
@@ -10,10 +11,17 @@ on:
 
 permissions:
   contents: write # crear el release y subirle los archivos
+  actions: read # SignPath lee los artefactos a firmar
+
+env:
+  # Firma con SignPath Foundation: se activa sola cuando existen estas
+  # variables del repositorio (Settings → Secrets and variables →
+  # Actions → Variables) y el secreto SIGNPATH_API_TOKEN.
+  SIGN: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
 
 jobs:
   release:
-    runs-on: windows-latest
+    runs-on: windows-latest # SignPath exige que todo corra en máquinas de GitHub
     steps:
       - uses: actions/checkout@v4
 
@@ -43,14 +51,79 @@ jobs:
           }
           cargo build --release
 
+      # --- Firma de simpcky.exe (antes de meterlo en el instalador) ---
+      - name: Subir simpcky.exe sin firmar
+        if: env.SIGN == 'true'
+        id: exe-unsigned
+        uses: actions/upload-artifact@v7
+        with:
+          name: simpcky-exe-sin-firmar
+          path: target/release/simpcky.exe
+
+      - name: Firmar simpcky.exe (SignPath; espera la aprobación)
+        if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.exe-unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600 # una hora para aprobar
+          output-artifact-directory: firmado/exe
+
+      - name: Usar simpcky.exe firmado
+        if: env.SIGN == 'true'
+        shell: pwsh
+        run: Copy-Item firmado\exe\simpcky.exe target\release\simpcky.exe -Force
+
+      # --- Instalador ---
       - name: Instalar Inno Setup
         run: choco install innosetup --no-progress -y
 
-      - name: Armar el instalador y su huella
+      - name: Armar el instalador
         shell: pwsh
         run: |
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q "/DAppVersion=$env:VERSION" installer\simpcky.iss
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup falló ($LASTEXITCODE)." }
+
+      - name: Subir el instalador sin firmar
+        if: env.SIGN == 'true'
+        id: setup-unsigned
+        uses: actions/upload-artifact@v7
+        with:
+          name: instalador-sin-firmar
+          path: dist/Simpcky-Setup-${{ env.VERSION }}.exe
+
+      - name: Firmar el instalador (SignPath; espera la aprobación)
+        if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.setup-unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: firmado/setup
+
+      - name: Usar el instalador firmado y comprobar las firmas
+        if: env.SIGN == 'true'
+        shell: pwsh
+        run: |
+          Copy-Item "firmado\setup\Simpcky-Setup-$env:VERSION.exe" dist\ -Force
+          foreach ($f in "target\release\simpcky.exe", "dist\Simpcky-Setup-$env:VERSION.exe") {
+            $s = Get-AuthenticodeSignature $f
+            "$f → $($s.Status) ($($s.SignerCertificate.Subject))"
+            if ($s.Status -ne 'Valid') { throw "La firma de $f no es válida." }
+          }
+
+      # --- Publicar ---
+      - name: Huella SHA-256
+        shell: pwsh
+        run: |
           $name = "Simpcky-Setup-$env:VERSION.exe"
           $hash = (Get-FileHash "dist\$name" -Algorithm SHA256).Hash.ToLower()
           # Formato de sha256sum ("<hash>  <archivo>"): lo lee el actualizador.
@@ -62,5 +135,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          $site = "https://santiagopostacchini.github.io/Simpcky"
+          $firma = if ($env:SIGN -eq 'true') {
+            "Firmado con firma de código gratuita de [SignPath.io](https://about.signpath.io/), certificado de [SignPath Foundation](https://signpath.org/)."
+          } else {
+            "Esta versión no está firmada digitalmente: Windows puede mostrar ""Windows protegió tu PC"" (*Más información* → *Ejecutar de todas formas*)."
+          }
+          @"
+          **Instalar:** bajá ``Simpcky-Setup-$env:VERSION.exe`` y abrilo. Las copias ya instaladas se actualizan solas.
+
+          $firma [Política de firma de código]($site/firma.html) · [Privacidad]($site/privacidad.html)
+
+          "@ | Out-File -Encoding utf8 notas.md
           gh release create "${{ github.ref_name }}" (Get-ChildItem dist | ForEach-Object FullName) `
-            --title "Simpcky $env:VERSION" --generate-notes
+            --title "Simpcky $env:VERSION" --notes-file notas.md --generate-notes
