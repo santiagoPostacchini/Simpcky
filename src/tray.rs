@@ -1,32 +1,65 @@
 //! Icono y menú de la bandeja del sistema, más la ventana "controladora"
 //! oculta que los recibe (sin ella, Shell_NotifyIcon no tiene a quién
 //! avisarle de los clics).
+//!
+//! La controladora es una ventana de nivel superior invisible, no una
+//! ventana "solo mensajes" (`HWND_MESSAGE`) como antes: esas no reciben
+//! mensajes de difusión, y hay dos que importan mucho:
+//! - `TaskbarCreated`: Explorer se reinició. Hay que volver a poner el
+//!   icono en la bandeja y recrear las notas (Explorer se llevó puesto
+//!   a Progman, y con él a todas las notas ancladas).
+//! - `WM_QUERYENDSESSION` / `WM_ENDSESSION`: Windows se apaga o cierra
+//!   la sesión. Sin responder, la app quedaba como "no responde" y
+//!   Windows la mataba (el evento "Quiesce" del registro de eventos),
+//!   sin guardar lo último escrito.
 
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::*;
-use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW;
-use windows_sys::Win32::System::Registry::*;
 use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-use crate::app::{app, save_all};
+use crate::app::{app, save_all, save_settings};
 use crate::note;
 use crate::persist::{NoteData, RollMode};
+use crate::shell;
 use crate::win::wide;
 
-const CONTROLLER_CLASS: &str = "SimpckyController";
+pub const CONTROLLER_CLASS: &str = "SimpckyController";
 const WM_TRAYICON: u32 = WM_APP + 1;
+/// Otra instancia (lanzada desde el clic derecho del escritorio, con
+/// `--new`) pide una nota nueva en (`wparam`, `lparam`), en
+/// coordenadas de pantalla.
+pub const WM_APP_NEW_AT: u32 = WM_APP + 2;
+/// Otra instancia (lanzada sin argumentos: doble clic en el .exe con
+/// la app ya abierta) pide mostrar "Todas las notas".
+pub const WM_APP_SHOW_ALL: u32 = WM_APP + 3;
+/// Alguna nota se quedó sin ventana (ver `note::on_destroy`).
+const WM_APP_RECREATE: u32 = WM_APP + 4;
 const TRAY_UID: u32 = 1;
+const TIMER_RECREATE: usize = 1;
 
 const ID_NEW_NOTE: u32 = 1000;
 const ID_ROLL_DEFAULT_MANUAL: u32 = 1001;
 const ID_ROLL_DEFAULT_AUTO: u32 = 1002;
 const ID_AUTOSTART: u32 = 1003;
 const ID_EXIT: u32 = 1004;
+pub const ID_ALL_NOTES: u32 = 1005;
+const ID_DARK_MODE: u32 = 1006;
+const ID_DESKTOP_MENU: u32 = 1007;
 
-const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-const RUN_VALUE: &str = "Simpcky";
+fn taskbar_created_msg() -> u32 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static MSG: AtomicU32 = AtomicU32::new(0);
+    let cached = MSG.load(Ordering::Relaxed);
+    if cached != 0 {
+        return cached;
+    }
+    let name = wide("TaskbarCreated");
+    let id = unsafe { RegisterWindowMessageW(name.as_ptr()) };
+    MSG.store(id, Ordering::Relaxed);
+    id
+}
 
 /// Registra la clase de la ventana controladora oculta.
 pub fn register_class(hinstance: HINSTANCE) {
@@ -39,12 +72,12 @@ pub fn register_class(hinstance: HINSTANCE) {
             cbClsExtra: 0,
             cbWndExtra: 0,
             hInstance: hinstance,
-            hIcon: null_mut(),
+            hIcon: crate::icon::app_icon_large(),
             hCursor: null_mut(),
             hbrBackground: null_mut(),
             lpszMenuName: null(),
             lpszClassName: class_name.as_ptr(),
-            hIconSm: null_mut(),
+            hIconSm: crate::icon::app_icon(),
         };
         RegisterClassExW(&wc);
     }
@@ -54,23 +87,28 @@ pub fn register_class(hinstance: HINSTANCE) {
 /// Devuelve su HWND.
 pub fn init(hinstance: HINSTANCE) -> HWND {
     let class_name = wide(CONTROLLER_CLASS);
+    let title = wide("Simpcky");
     let hwnd = unsafe {
         CreateWindowExW(
-            0,
+            WS_EX_TOOLWINDOW,
             class_name.as_ptr(),
-            null(),
+            title.as_ptr(),
+            WS_POPUP, // sin WS_VISIBLE: nunca se muestra
             0,
             0,
             0,
             0,
-            0,
-            HWND_MESSAGE,
+            null_mut(),
             null_mut(),
             hinstance,
             null(),
         )
     };
     if !hwnd.is_null() {
+        // Sin esto, un proceso con menos privilegios (o el propio
+        // Explorer en algunas configuraciones) no puede hacernos llegar
+        // TaskbarCreated.
+        unsafe { ChangeWindowMessageFilterEx(hwnd, taskbar_created_msg(), MSGFLT_ALLOW, null_mut()) };
         add_tray_icon(hwnd);
         app().lock().unwrap().controller_hwnd = hwnd as isize;
     }
@@ -90,16 +128,18 @@ fn set_wide_buf(dst: &mut [u16], s: &str) {
 
 fn add_tray_icon(hwnd: HWND) {
     unsafe {
-        let icon = LoadIconW(null_mut(), IDI_APPLICATION);
         let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
         nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
         nid.hWnd = hwnd;
         nid.uID = TRAY_UID;
         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         nid.uCallbackMessage = WM_TRAYICON;
-        nid.hIcon = icon;
+        nid.hIcon = crate::icon::app_icon();
         set_wide_buf(&mut nid.szTip, "Simpcky — notas adhesivas");
-        Shell_NotifyIconW(NIM_ADD, &nid);
+        // Si ya estaba (NIM_ADD falla), se actualiza.
+        if Shell_NotifyIconW(NIM_ADD, &nid) == 0 {
+            Shell_NotifyIconW(NIM_MODIFY, &nid);
+        }
     }
 }
 
@@ -113,59 +153,128 @@ fn remove_tray_icon(hwnd: HWND) {
     }
 }
 
-/// Crea una nota nueva en una posición en cascada y la persiste.
+/// Pide (en cola) que se recreen las notas que se quedaron sin ventana.
+pub fn request_recreate() {
+    let hwnd = { app().lock().unwrap().controller_hwnd } as HWND;
+    if !hwnd.is_null() {
+        unsafe { PostMessageW(hwnd, WM_APP_RECREATE, 0, 0) };
+    }
+}
+
+// -----------------------------------------------------------------
+// Notas nuevas
+// -----------------------------------------------------------------
+
+/// Nota nueva desde la bandeja (o Ctrl+N): en la primera posición de
+/// la cascada que no esté ocupada por otra nota. Antes la posición
+/// salía de "cuántas notas hay", y la nota nueva caía justo encima (o
+/// debajo) de una vieja.
 pub fn spawn_new_note() {
-    let id = crate::app::next_note_id();
-    let (x, y, roll_mode) = {
+    let taken: Vec<(i32, i32)> = {
         let a = app().lock().unwrap();
-        let step = (a.notes.len() as i32) % 8;
-        (120 + step * 28, 120 + step * 28, a.default_roll_mode)
+        a.notes.values().map(|nr| (nr.data.x, nr.data.y)).collect()
     };
-    let color = ((id.saturating_sub(1)) % note::PALETTE.len() as u32) as u8;
-    let data = NoteData::new(id, x, y, color, roll_mode);
+    let (base_x, base_y) = unsafe {
+        let mut work = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut work as *mut RECT as *mut core::ffi::c_void, 0);
+        (work.left + 120, work.top + 100)
+    };
+    let mut pos = (base_x, base_y);
+    for step in 0..24 {
+        let candidate = (base_x + step * 32, base_y + step * 32);
+        let busy = taken.iter().any(|&(x, y)| (x - candidate.0).abs() < 16 && (y - candidate.1).abs() < 16);
+        pos = candidate;
+        if !busy {
+            break;
+        }
+    }
+    spawn_note_at(pos.0, pos.1);
+}
+
+/// Crea una nota con su esquina superior izquierda cerca de (`x`, `y`)
+/// (coordenadas de pantalla), ajustada para que entre entera en el
+/// monitor, y la muestra al frente con el cursor listo para escribir.
+///
+/// Mostrarla al frente es lo que faltaba: una nota nueva es un widget
+/// de escritorio, y el escritorio está DETRÁS de todas las ventanas.
+/// Se creaba bien (quedaba en `notes.json`) pero nacía tapada por lo
+/// que hubiera abierto — "Nueva nota" parecía no hacer nada. Ahora se
+/// asoma adelante (`note::open_note`) y vuelve sola a su lugar en el
+/// escritorio apenas se hace clic en otra cosa.
+pub fn spawn_note_at(x: i32, y: i32) {
+    let id = crate::app::next_note_id();
+    let roll_mode = crate::app::default_roll_mode();
+    let color = ((id.saturating_sub(1)) % crate::theme::PALETTE_LEN as u32) as u8;
+    let mut data = NoteData::new(id, x, y, color, roll_mode);
+    let (cx, cy) = note::clamp_to_work_area(x, y, data.w, data.h);
+    data.x = cx;
+    data.y = cy;
     let hwnd = note::create_note(data);
     if !hwnd.is_null() {
         save_all();
+        note::open_note(hwnd);
+    }
+}
+
+/// Nota nueva desde el clic derecho del escritorio: con el encabezado
+/// justo bajo el cursor, como si se la hubiera "sacado" de ahí.
+pub fn spawn_note_near_cursor(x: i32, y: i32) {
+    spawn_note_at(x - 24, y - 16);
+}
+
+// -----------------------------------------------------------------
+// Menú
+// -----------------------------------------------------------------
+
+fn append_check(menu: HMENU, id: u32, label: &str, checked: bool) {
+    let w = wide(label);
+    unsafe {
+        AppendMenuW(
+            menu,
+            MF_STRING | if checked { MF_CHECKED } else { MF_UNCHECKED },
+            id as usize,
+            w.as_ptr(),
+        );
     }
 }
 
 fn show_tray_menu(hwnd: HWND) {
-    let manual = { app().lock().unwrap().default_roll_mode == RollMode::Manual };
-    let autostart_on = is_autostart_enabled();
+    let (manual, desktop_menu) = {
+        let a = app().lock().unwrap();
+        (a.settings.default_roll_mode == RollMode::Manual, a.settings.desktop_menu)
+    };
+    let autostart_on = shell::is_autostart_enabled();
 
     unsafe {
+        // Mismo orden y agrupación que la pantalla "Menús y bandeja"
+        // del diseño: nueva nota (con su atajo), el grupo de enrollado
+        // por defecto bajo su encabezado, todas las notas, y al final
+        // las preferencias y salir.
         let menu = CreatePopupMenu();
 
-        let new_note = wide("Nueva nota");
+        let new_note = wide("Nueva nota\tCtrl+N");
         AppendMenuW(menu, MF_STRING, ID_NEW_NOTE as usize, new_note.as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
 
-        let roll_menu = CreatePopupMenu();
+        // Encabezado de sección: un ítem deshabilitado, que es como se
+        // escribe un título de grupo en un menú nativo.
+        let roll_header = wide("Enrollar notas nuevas");
+        AppendMenuW(menu, MF_STRING | MF_DISABLED | MF_GRAYED, 0, roll_header.as_ptr());
         let manual_label = wide("Manual (predeterminado)");
         let auto_label = wide("Auto");
-        AppendMenuW(
-            roll_menu,
-            MF_STRING | if manual { MF_CHECKED } else { MF_UNCHECKED },
-            ID_ROLL_DEFAULT_MANUAL as usize,
-            manual_label.as_ptr(),
-        );
-        AppendMenuW(
-            roll_menu,
-            MF_STRING | if !manual { MF_CHECKED } else { MF_UNCHECKED },
-            ID_ROLL_DEFAULT_AUTO as usize,
-            auto_label.as_ptr(),
-        );
-        let roll_label = wide("Enrollar notas nuevas");
-        AppendMenuW(menu, MF_POPUP, roll_menu as usize, roll_label.as_ptr());
+        AppendMenuW(menu, MF_STRING, ID_ROLL_DEFAULT_MANUAL as usize, manual_label.as_ptr());
+        AppendMenuW(menu, MF_STRING, ID_ROLL_DEFAULT_AUTO as usize, auto_label.as_ptr());
+        note::mark_radio(menu, ID_ROLL_DEFAULT_MANUAL, manual);
+        note::mark_radio(menu, ID_ROLL_DEFAULT_AUTO, !manual);
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
 
-        let autostart_label = wide("Iniciar con Windows");
-        AppendMenuW(
-            menu,
-            MF_STRING | if autostart_on { MF_CHECKED } else { MF_UNCHECKED },
-            ID_AUTOSTART as usize,
-            autostart_label.as_ptr(),
-        );
+        let all_notes = wide("Todas las notas");
+        AppendMenuW(menu, MF_STRING, ID_ALL_NOTES as usize, all_notes.as_ptr());
+        AppendMenuW(menu, MF_SEPARATOR, 0, null());
+
+        append_check(menu, ID_DARK_MODE, "Modo oscuro", crate::theme::is_dark());
+        append_check(menu, ID_DESKTOP_MENU, "\"Nueva nota\" en el clic derecho del escritorio", desktop_menu);
+        append_check(menu, ID_AUTOSTART, "Iniciar con Windows", autostart_on);
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
 
         let exit_label = wide("Salir");
@@ -180,79 +289,44 @@ fn show_tray_menu(hwnd: HWND) {
     }
 }
 
-// -----------------------------------------------------------------
-// Iniciar con Windows (HKCU\...\Run)
-// -----------------------------------------------------------------
-
-fn exe_path_wide() -> Vec<u16> {
-    let mut buf = vec![0u16; 512];
-    let len = unsafe { GetModuleFileNameW(null_mut(), buf.as_mut_ptr(), buf.len() as u32) };
-    buf.truncate(len.max(0) as usize);
-    buf.push(0);
-    buf
+fn set_default_roll_mode(mode: RollMode) {
+    app().lock().unwrap().settings.default_roll_mode = mode;
+    save_settings();
 }
 
-fn is_autostart_enabled() -> bool {
-    unsafe {
-        let subkey = wide(RUN_KEY);
-        let mut hkey: HKEY = null_mut();
-        if RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_READ, &mut hkey) != ERROR_SUCCESS {
-            return false;
-        }
-        let value = wide(RUN_VALUE);
-        let mut kind: u32 = 0;
-        let mut size: u32 = 0;
-        let ok = RegQueryValueExW(hkey, value.as_ptr(), null(), &mut kind, null_mut(), &mut size) == ERROR_SUCCESS;
-        RegCloseKey(hkey);
-        ok
+fn toggle_desktop_menu() {
+    let enable = {
+        let mut a = app().lock().unwrap();
+        a.settings.desktop_menu = !a.settings.desktop_menu;
+        a.settings.desktop_menu
+    };
+    if enable {
+        shell::register_desktop_menu();
+    } else {
+        shell::unregister_desktop_menu();
     }
+    save_settings();
 }
 
-fn toggle_autostart() {
-    let enable = !is_autostart_enabled();
-    unsafe {
-        let subkey = wide(RUN_KEY);
-        let mut hkey: HKEY = null_mut();
-        if RegCreateKeyExW(
-            HKEY_CURRENT_USER,
-            subkey.as_ptr(),
-            0,
-            null(),
-            REG_OPTION_NON_VOLATILE,
-            KEY_WRITE | KEY_READ,
-            null(),
-            &mut hkey,
-            null_mut(),
-        ) != ERROR_SUCCESS
-        {
-            return;
-        }
-        let value = wide(RUN_VALUE);
-        if enable {
-            let path = exe_path_wide();
-            let bytes = std::slice::from_raw_parts(path.as_ptr() as *const u8, path.len() * 2);
-            RegSetValueExW(hkey, value.as_ptr(), 0, REG_SZ, bytes.as_ptr(), bytes.len() as u32);
-        } else {
-            RegDeleteValueW(hkey, value.as_ptr());
-        }
-        RegCloseKey(hkey);
-    }
+/// Salir de verdad: guardar todo, sacar el icono, terminar el bucle de
+/// mensajes. Las ventanas de las notas se van con el proceso (sin
+/// WM_DESTROY), así que sus datos quedan intactos en disco.
+fn exit_app(hwnd: HWND) {
+    crate::app::set_shutting_down();
+    note::flush_all();
+    unsafe { DestroyWindow(hwnd) };
 }
 
 fn handle_command(hwnd: HWND, id: u32) {
     match id {
         ID_NEW_NOTE => spawn_new_note(),
-        ID_ROLL_DEFAULT_MANUAL => {
-            app().lock().unwrap().default_roll_mode = RollMode::Manual;
-        }
-        ID_ROLL_DEFAULT_AUTO => {
-            app().lock().unwrap().default_roll_mode = RollMode::Auto;
-        }
-        ID_AUTOSTART => toggle_autostart(),
-        ID_EXIT => {
-            note::flush_all();
-            unsafe { DestroyWindow(hwnd) };
-        }
+        ID_ALL_NOTES => crate::allnotes::show(),
+        ID_ROLL_DEFAULT_MANUAL => set_default_roll_mode(RollMode::Manual),
+        ID_ROLL_DEFAULT_AUTO => set_default_roll_mode(RollMode::Auto),
+        ID_DARK_MODE => crate::theme::set_dark(!crate::theme::is_dark()),
+        ID_DESKTOP_MENU => toggle_desktop_menu(),
+        ID_AUTOSTART => shell::set_autostart(!shell::is_autostart_enabled()),
+        ID_EXIT => exit_app(hwnd),
         _ => {}
     }
 }
@@ -261,7 +335,13 @@ unsafe extern "system" fn controller_wndproc(hwnd: HWND, msg: u32, wparam: WPARA
     match msg {
         WM_TRAYICON => {
             match lparam as u32 {
-                WM_LBUTTONUP => spawn_new_note(),
+                WM_LBUTTONUP => {
+                    // Igual que antes de abrir el menú: pasar al frente
+                    // mientras el clic en la bandeja nos da permiso, así
+                    // la nota nueva puede tomar el foco después.
+                    SetForegroundWindow(hwnd);
+                    spawn_new_note();
+                }
                 WM_RBUTTONUP => show_tray_menu(hwnd),
                 _ => {}
             }
@@ -271,9 +351,46 @@ unsafe extern "system" fn controller_wndproc(hwnd: HWND, msg: u32, wparam: WPARA
             handle_command(hwnd, (wparam & 0xffff) as u32);
             0
         }
+        WM_APP_NEW_AT => {
+            spawn_note_near_cursor(wparam as isize as i32, lparam as i32);
+            0
+        }
+        WM_APP_SHOW_ALL => {
+            crate::allnotes::show();
+            0
+        }
+        WM_APP_RECREATE => {
+            // Con un respiro: si fue Explorer reiniciándose, Progman
+            // tarda un momento en volver a existir.
+            SetTimer(hwnd, TIMER_RECREATE, 1500, None);
+            0
+        }
+        WM_TIMER if wparam == TIMER_RECREATE => {
+            let progman = wide("Progman");
+            if !FindWindowW(progman.as_ptr(), null()).is_null() {
+                KillTimer(hwnd, TIMER_RECREATE);
+                note::recreate_lost();
+            }
+            0
+        }
+        WM_QUERYENDSESSION => 1,
+        WM_ENDSESSION => {
+            if wparam != 0 {
+                crate::app::set_shutting_down();
+                note::flush_all();
+            }
+            0
+        }
         WM_DESTROY => {
             remove_tray_icon(hwnd);
             PostQuitMessage(0);
+            0
+        }
+        _ if msg == taskbar_created_msg() => {
+            // Explorer se reinició: icono de vuelta a la bandeja, y las
+            // notas que se quedaron sin ventana, de vuelta al escritorio.
+            add_tray_icon(hwnd);
+            SetTimer(hwnd, TIMER_RECREATE, 500, None);
             0
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),

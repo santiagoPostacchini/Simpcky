@@ -33,10 +33,11 @@ impl RollMode {
     }
 }
 
-/// Capa en la que vive la ventana de la nota.
-/// `Desktop` (anclada detrás de los iconos) está en el diseño pero
-/// todavía no implementada — ver README. Se conserva el valor si se lee
-/// de un archivo futuro, pero hoy se trata como `Normal`.
+/// Capa en la que vive la ventana de la nota. En la práctica es
+/// binario: `AlwaysOnTop` (ventana normal, con botón en la barra de
+/// tareas) o "widget de escritorio" — y `Normal` y `Desktop` son
+/// ambos ese segundo caso (se conserva la distinción solo por
+/// compatibilidad con archivos viejos; ver `note::set_layer`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Layer {
     Normal,
@@ -75,6 +76,9 @@ pub struct NoteData {
     pub layer: Layer,
     pub roll_mode: RollMode,
     pub rolled: bool,
+    /// Nombre elegido por el usuario. Vacío = se muestra la primera
+    /// línea del texto (y si tampoco hay, "Nota").
+    pub title: String,
     pub text: String,
 }
 
@@ -87,9 +91,14 @@ impl NoteData {
             w: 280,
             h: 320,
             color,
-            layer: Layer::Normal,
+            // Por defecto, "widget de escritorio": ancla detrás de
+            // los íconos y sobrevive a "Mostrar escritorio". Solo
+            // "Siempre encima" la saca de ahí y la convierte en una
+            // ventana normal con botón en la barra de tareas.
+            layer: Layer::Desktop,
             roll_mode,
             rolled: false,
+            title: String::new(),
             text: String::new(),
         }
     }
@@ -125,8 +134,17 @@ pub fn save_notes(notes: &[NoteData]) {
     if fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let json = write_notes(notes);
-    let _ = fs::write(notes_path(), json);
+    write_atomic(&notes_path(), &write_notes(notes));
+}
+
+/// Escribe a un archivo temporal y lo renombra encima del real: si la
+/// app muere a mitad de la escritura (un apagado, un cuelgue), queda
+/// el archivo anterior entero en vez de uno cortado por la mitad.
+fn write_atomic(path: &std::path::Path, contents: &str) {
+    let tmp = path.with_extension("json.tmp");
+    if fs::write(&tmp, contents).is_ok() && fs::rename(&tmp, path).is_err() {
+        let _ = fs::write(path, contents);
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -162,6 +180,7 @@ fn write_notes(notes: &[NoteData]) -> String {
         out.push_str(&format!("\"layer\":{},", n.layer.as_u8()));
         out.push_str(&format!("\"rollMode\":{},", n.roll_mode.as_u8()));
         out.push_str(&format!("\"rolled\":{},", n.rolled));
+        out.push_str(&format!("\"title\":\"{}\",", escape_json(&n.title)));
         out.push_str(&format!("\"text\":\"{}\"", escape_json(&n.text)));
         out.push('}');
         if i + 1 != notes.len() {
@@ -291,13 +310,17 @@ impl<'a> P<'a> {
         Some(Json::Arr(items))
     }
 
+    /// Lee un string JSON. Los bytes se juntan tal cual y se decodifican
+    /// como UTF-8 al final: antes cada byte se convertía por separado a
+    /// `char`, y cualquier tilde o eñe volvía como basura ("Ã±") al
+    /// recargar — y empeoraba con cada guardado.
     fn parse_str(&mut self) -> Option<String> {
         self.skip_ws();
         if self.peek() != Some(b'"') {
             return None;
         }
         self.i += 1;
-        let mut out = String::new();
+        let mut out: Vec<u8> = Vec::new();
         loop {
             let c = *self.b.get(self.i)?;
             self.i += 1;
@@ -307,31 +330,26 @@ impl<'a> P<'a> {
                     let esc = *self.b.get(self.i)?;
                     self.i += 1;
                     match esc {
-                        b'"' => out.push('"'),
-                        b'\\' => out.push('\\'),
-                        b'/' => out.push('/'),
-                        b'n' => out.push('\n'),
-                        b'r' => out.push('\r'),
-                        b't' => out.push('\t'),
+                        b'n' => out.push(b'\n'),
+                        b'r' => out.push(b'\r'),
+                        b't' => out.push(b'\t'),
                         b'u' => {
                             let hex = self.b.get(self.i..self.i + 4)?;
                             let hex = std::str::from_utf8(hex).ok()?;
                             let cp = u32::from_str_radix(hex, 16).ok()?;
                             self.i += 4;
                             if let Some(ch) = char::from_u32(cp) {
-                                out.push(ch);
+                                let mut buf = [0u8; 4];
+                                out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
                             }
                         }
-                        other => out.push(other as char),
+                        other => out.push(other), // \" \\ \/
                     }
                 }
-                _ => {
-                    // Reconstruye UTF-8 multibyte tal cual (el texto ya viene en UTF-8).
-                    out.push(c as char);
-                }
+                _ => out.push(c),
             }
         }
-        Some(out)
+        Some(String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
     }
 
     fn parse_num(&mut self) -> Option<Json> {
@@ -403,9 +421,57 @@ fn parse_notes(text: &str) -> Vec<NoteData> {
                 layer: Layer::from_u8(as_u8(obj_get(&fields, "layer"), 0)),
                 roll_mode: RollMode::from_u8(as_u8(obj_get(&fields, "rollMode"), 0)),
                 rolled: as_bool(obj_get(&fields, "rolled"), false),
+                title: as_str(obj_get(&fields, "title")),
                 text: as_str(obj_get(&fields, "text")),
             });
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------
+// Ajustes de la app (`settings.json`, al lado de `notes.json`)
+// ---------------------------------------------------------------------
+
+/// Preferencias globales. Van en un archivo aparte para que un
+/// `notes.json` viejo (que es solo un array) siga leyéndose tal cual.
+#[derive(Clone, Copy, Debug)]
+pub struct Settings {
+    pub dark: bool,
+    /// Modo de enrollado para las notas nuevas (Manual salvo que el
+    /// usuario elija otra cosa en el menú de la bandeja).
+    pub default_roll_mode: RollMode,
+    /// "Nueva nota adhesiva" en el menú del clic derecho del escritorio.
+    pub desktop_menu: bool,
+}
+
+fn settings_path() -> PathBuf {
+    data_dir().join("settings.json")
+}
+
+/// `None` si todavía no hay ajustes guardados (primera vez con esta
+/// versión): el que llama decide los valores iniciales.
+pub fn load_settings() -> Option<Settings> {
+    let text = fs::read_to_string(settings_path()).ok()?;
+    let Json::Obj(fields) = P::new(&text).parse_value()? else {
+        return None;
+    };
+    Some(Settings {
+        dark: as_bool(obj_get(&fields, "dark"), false),
+        default_roll_mode: RollMode::from_u8(as_u8(obj_get(&fields, "defaultRollMode"), 0)),
+        desktop_menu: as_bool(obj_get(&fields, "desktopMenu"), true),
+    })
+}
+
+pub fn save_settings(s: &Settings) {
+    if fs::create_dir_all(data_dir()).is_err() {
+        return;
+    }
+    let json = format!(
+        "{{\"dark\":{},\"defaultRollMode\":{},\"desktopMenu\":{}}}\n",
+        s.dark,
+        s.default_roll_mode.as_u8(),
+        s.desktop_menu
+    );
+    write_atomic(&settings_path(), &json);
 }
