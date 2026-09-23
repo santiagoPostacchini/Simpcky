@@ -1,0 +1,129 @@
+/* Sitio de Simpcky (GitHub Pages). Misma paleta que las notas. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #f8fafc;
+  --text: #1f2937;
+  --muted: #4b5563;
+  --line: #e5e7eb;
+  --link: #b45309;
+  --card: #ffffff;
+  /* paleta de las notas: encabezado / cuerpo */
+  --y-h: #fde68a; --y-b: #fef9c3;
+  --p-h: #fbcfe8; --p-b: #fce7f3;
+  --g-h: #bbf7d0; --g-b: #dcfce7;
+  --b-h: #bfdbfe; --b-b: #dbeafe;
+  --v-h: #e9d5ff; --v-b: #f3e8ff;
+  --s-h: #e2e8f0; --s-b: #f1f5f9;
+  --note-text: #1f2937;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1f2023;
+    --text: #e5e7eb;
+    --muted: #9ca3af;
+    --line: #2c2e33;
+    --link: #fcd34d;
+    --card: #26282c;
+    --y-h: #6b5514; --y-b: #2a2515;
+    --p-h: #74284f; --p-b: #2b1822;
+    --g-h: #1d5e3e; --g-b: #15261c;
+    --b-h: #234a80; --b-b: #151f30;
+    --v-h: #52307f; --v-b: #201830;
+    --s-h: #3e4652; --s-b: #1e2227;
+    --note-text: #e5e7eb;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 17px/1.65 "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+.wrap { max-width: 760px; margin: 0 auto; padding: 32px 16px 64px; }
+
+a { color: var(--link); text-underline-offset: 2px; }
+
+header.site {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 36px;
+}
+header.site img { width: 48px; height: 48px; }
+header.site a.brand { color: var(--text); text-decoration: none; font-size: 22px; font-weight: 700; }
+header.site nav { margin-left: auto; display: flex; gap: 18px; font-size: 15px; }
+
+h1 { font-size: clamp(30px, 6vw, 44px); line-height: 1.15; margin: 0 0 14px; letter-spacing: -0.01em; }
+h2 { font-size: 22px; margin: 44px 0 10px; }
+h3 { font-size: 18px; margin: 28px 0 6px; }
+p, li { color: var(--text); }
+.lead { font-size: 19px; color: var(--muted); margin: 0 0 28px; max-width: 34em; }
+
+/* Una nota adhesiva: franja de encabezado + cuerpo */
+.note {
+  border-radius: 12px;
+  overflow: hidden;
+  color: var(--note-text);
+  background: var(--y-b);
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.12);
+}
+.note > .bar { height: 14px; background: var(--y-h); }
+.note > .body { padding: 16px 18px 18px; }
+.note h3 { margin: 0 0 4px; font-size: 16px; }
+.note p { margin: 0; font-size: 15px; line-height: 1.5; color: inherit; }
+
+.note.pink { background: var(--p-b); } .note.pink > .bar { background: var(--p-h); }
+.note.green { background: var(--g-b); } .note.green > .bar { background: var(--g-h); }
+.note.blue { background: var(--b-b); } .note.blue > .bar { background: var(--b-h); }
+.note.violet { background: var(--v-b); } .note.violet > .bar { background: var(--v-h); }
+.note.slate { background: var(--s-b); } .note.slate > .bar { background: var(--s-h); }
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 16px;
+  margin: 8px 0 12px;
+}
+
+.actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 40px; }
+.button {
+  display: inline-block;
+  padding: 11px 20px;
+  border-radius: 10px;
+  font-weight: 600;
+  font-size: 16px;
+  text-decoration: none;
+  background: var(--y-h);
+  color: var(--note-text);
+}
+.button.secondary { background: transparent; color: var(--text); border: 1px solid var(--line); }
+
+table { width: 100%; border-collapse: collapse; margin: 12px 0 8px; font-size: 15px; }
+th, td { text-align: left; vertical-align: top; padding: 10px 12px; border-top: 1px solid var(--line); }
+th { font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); border-top: none; }
+code { font-family: Consolas, "Cascadia Mono", monospace; font-size: 0.9em; overflow-wrap: anywhere; }
+
+.meta { color: var(--muted); font-size: 15px; }
+
+footer.site {
+  margin-top: 56px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+  font-size: 14px;
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+}
+footer.site a { color: var(--muted); }
+
+@media (max-width: 520px) {
+  header.site { flex-wrap: wrap; }
+  header.site nav { margin-left: 0; width: 100%; }
+}

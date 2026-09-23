@@ -120,6 +120,18 @@ Ya funciona:
   modo oscuro, clic derecho del escritorio, iniciar con Windows,
   salir), en el mismo orden que el diseño.
 - "Iniciar con Windows" real, vía `HKCU\...\Run`.
+- **Sincronización con Google Drive (opcional)**: las mismas notas en
+  todas tus compus, en una carpeta oculta de tu Drive que solo ve
+  Simpcky. Se conecta desde el menú de la bandeja; la guía para crear el
+  cliente de Google (una sola vez) está en
+  [`docs/sincronizacion-google.md`](docs/sincronizacion-google.md).
+  La fusión es por partes de cada nota (contenido, color, posición,
+  estado), con lápidas para lo borrado: lo que se escribe en una compu
+  nunca se pierde por algo que pasó en otra. Todo con lo que trae
+  Windows (WinHTTP, CNG, DPAPI), sin bibliotecas nuevas. Cubierto por
+  tests (`cargo test`; los que usan la red real, con
+  `cargo test -- --ignored`); **falta la prueba de punta a punta con una
+  cuenta real**, que necesita el cliente de Google.
 - Persistencia en `%APPDATA%\Simpcky\notes.json`, con autoguardado
   (debounce ~600 ms al escribir; inmediato al mover/cambiar ajustes),
   y las preferencias en `settings.json` al lado.
@@ -195,6 +207,14 @@ se vería pero no se podría escribir ni arrastrar.
   nota al escritorio.
 - `src/allnotes.rs` — ventana "Todas las notas": buscador y grilla de
   tarjetas, dibujada a mano con GDI+ y doble buffer.
+- `src/sync.rs` — sincronización: la fusión (pura, con tests), cuándo
+  sincronizar y cómo aplicar lo que llega de otra compu.
+- `src/oauth.rs` — inicio de sesión con Google (navegador + 127.0.0.1 +
+  PKCE) y la credencial cifrada.
+- `src/drive.rs` — el archivo de notas en la carpeta oculta de Drive.
+- `src/http.rs` — cliente HTTPS mínimo sobre WinHTTP.
+- `src/crypto.rs` — azar, SHA-256, base64url y DPAPI (todo de Windows).
+- `src/json.rs` — lector/escritor de JSON a mano.
 - `src/rename.rs` — el cuadro para cambiarle el nombre a una nota.
 - `src/ghost.rs` — la mini nota que sigue al cursor al arrastrar una
   tarjeta al escritorio.
@@ -203,7 +223,7 @@ se vería pero no se podría escribir ni arrastrar.
   del escritorio.
 - `src/icon.rs` — carga el ícono embebido.
 - `src/tray.rs` — icono de bandeja, menú principal, notas nuevas.
-- `src/persist.rs` — modelo de datos y lectura/escritura de
-  `notes.json` (JSON escrito a mano, sin serde, para mantener el
-  binario chico).
+- `src/persist.rs` — modelo de datos (identidad global y hora de cada
+  parte de la nota) y los archivos `notes.json`, `settings.json` y
+  `sync.json`.
 - `src/win.rs` — helpers pequeños (cadenas UTF-16, `COLORREF`).

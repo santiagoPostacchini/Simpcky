@@ -1,15 +1,22 @@
-// Sin consola: Simpcky es una app de bandeja, no una CLI.
-#![windows_subsystem = "windows"]
+// Sin consola: Simpcky es una app de bandeja, no una CLI. (Salvo al
+// correr los tests, que necesitan la consola para mostrar resultados.)
+#![cfg_attr(not(test), windows_subsystem = "windows")]
 
 mod allnotes;
 mod app;
+mod crypto;
 mod desktop;
+mod drive;
 mod ghost;
+mod http;
 mod icon;
+mod json;
 mod note;
+mod oauth;
 mod persist;
 mod rename;
 mod shell;
+mod sync;
 mod theme;
 mod tray;
 mod win;
@@ -76,7 +83,7 @@ fn main() {
     theme::init(settings.dark);
 
     let hinstance = unsafe { GetModuleHandleW(null_mut()) } as HINSTANCE;
-    init_app(hinstance as isize, settings);
+    init_app(hinstance as isize, settings, persist::load_sync_state());
     if first_settings {
         app::save_settings();
     }
@@ -95,7 +102,14 @@ fn main() {
     allnotes::register_class(hinstance);
 
     load_or_create_notes();
+    // Lo que se acaba de cargar es el punto de partida para detectar
+    // cambios. Y se guarda enseguida: las notas de antes de la
+    // sincronización recibieron su identidad al cargarse, y tiene que
+    // quedar fija (si no, en cada arranque serían "otras" notas).
+    app::init_saved_parts();
+    save_all();
     tray::init(hinstance);
+    sync::on_startup();
 
     if want_new {
         // La app no estaba abierta y la arrancó el clic derecho del

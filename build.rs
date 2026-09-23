@@ -54,6 +54,7 @@ const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?
 fn main() {
     println!("cargo:rerun-if-changed=assets/simpcky.ico");
     println!("cargo:rerun-if-changed=build.rs");
+    embed_google_client();
 
     let target = std::env::var("TARGET").unwrap_or_default();
     if !target.contains("windows-msvc") {
@@ -67,6 +68,48 @@ fn main() {
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("simpcky.res");
     std::fs::write(&out, res).expect("no se pudo escribir el .res");
     println!("cargo:rustc-link-arg-bins={}", out.display());
+}
+
+/// El cliente OAuth de Google para la sincronización (ver
+/// `docs/sincronizacion-google.md`). Sale de, en orden:
+/// 1. las variables de entorno `SIMPCKY_GOOGLE_CLIENT_ID` y
+///    `SIMPCKY_GOOGLE_CLIENT_SECRET` (así compila GitHub Actions, con
+///    secretos del repositorio);
+/// 2. `google_client.json` en la raíz del proyecto: el archivo tal cual
+///    lo descarga la consola de Google Cloud. Está en `.gitignore`.
+///
+/// Sin ninguno de los dos, la app compila igual, solo que sin
+/// sincronización (el menú lo dice).
+fn embed_google_client() {
+    println!("cargo:rerun-if-changed=google_client.json");
+    println!("cargo:rerun-if-env-changed=SIMPCKY_GOOGLE_CLIENT_ID");
+    println!("cargo:rerun-if-env-changed=SIMPCKY_GOOGLE_CLIENT_SECRET");
+
+    let from_env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let (id, secret) = match (from_env("SIMPCKY_GOOGLE_CLIENT_ID"), from_env("SIMPCKY_GOOGLE_CLIENT_SECRET")) {
+        (Some(id), Some(secret)) => (id, secret),
+        _ => match std::fs::read_to_string("google_client.json") {
+            Ok(text) => match (json_string(&text, "client_id"), json_string(&text, "client_secret")) {
+                (Some(id), Some(secret)) => (id, secret),
+                _ => {
+                    println!("cargo:warning=google_client.json no tiene client_id/client_secret: sin sincronización");
+                    return;
+                }
+            },
+            Err(_) => return,
+        },
+    };
+    println!("cargo:rustc-env=SIMPCKY_GOOGLE_CLIENT_ID={id}");
+    println!("cargo:rustc-env=SIMPCKY_GOOGLE_CLIENT_SECRET={secret}");
+}
+
+/// El valor de texto de `"clave": "…"`, donde sea que esté en el JSON
+/// (alcanza para el archivo de Google, que no tiene nada anidado raro).
+fn json_string(text: &str, key: &str) -> Option<String> {
+    let pattern = format!("\"{key}\"");
+    let after = &text[text.find(&pattern)? + pattern.len()..];
+    let after = after.trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
+    Some(after[..after.find('"')?].to_string())
 }
 
 fn u16le(v: &[u8], at: usize) -> u16 {

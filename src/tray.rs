@@ -47,6 +47,10 @@ const ID_EXIT: u32 = 1004;
 pub const ID_ALL_NOTES: u32 = 1005;
 const ID_DARK_MODE: u32 = 1006;
 const ID_DESKTOP_MENU: u32 = 1007;
+const ID_SYNC_CONNECT: u32 = 1010;
+const ID_SYNC_NOW: u32 = 1011;
+const ID_SYNC_DISCONNECT: u32 = 1012;
+const ID_SYNC_CANCEL: u32 = 1013;
 
 fn taskbar_created_msg() -> u32 {
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -140,6 +144,26 @@ fn add_tray_icon(hwnd: HWND) {
         if Shell_NotifyIconW(NIM_ADD, &nid) == 0 {
             Shell_NotifyIconW(NIM_MODIFY, &nid);
         }
+    }
+}
+
+/// Aviso tipo globo desde el ícono de la bandeja (Windows lo muestra
+/// como notificación del sistema).
+pub fn notify(title: &str, text: &str) {
+    let hwnd = { app().lock().unwrap().controller_hwnd } as HWND;
+    if hwnd.is_null() {
+        return;
+    }
+    unsafe {
+        let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
+        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+        nid.hWnd = hwnd;
+        nid.uID = TRAY_UID;
+        nid.uFlags = NIF_INFO;
+        nid.dwInfoFlags = NIIF_INFO;
+        set_wide_buf(&mut nid.szInfoTitle, title);
+        set_wide_buf(&mut nid.szInfo, text);
+        Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
 }
 
@@ -272,6 +296,9 @@ fn show_tray_menu(hwnd: HWND) {
         AppendMenuW(menu, MF_STRING, ID_ALL_NOTES as usize, all_notes.as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
 
+        append_sync_section(menu);
+        AppendMenuW(menu, MF_SEPARATOR, 0, null());
+
         append_check(menu, ID_DARK_MODE, "Modo oscuro", crate::theme::is_dark());
         append_check(menu, ID_DESKTOP_MENU, "\"Nueva nota\" en el clic derecho del escritorio", desktop_menu);
         append_check(menu, ID_AUTOSTART, "Iniciar con Windows", autostart_on);
@@ -286,6 +313,34 @@ fn show_tray_menu(hwnd: HWND) {
         TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_LEFTALIGN, pt.x, pt.y, 0, hwnd, null());
         PostMessageW(hwnd, WM_NULL, 0, 0);
         DestroyMenu(menu);
+    }
+}
+
+/// La sección de sincronización del menú: qué cuenta está conectada y
+/// cómo anda, o cómo conectarse. Es opcional: sin cuenta, un solo ítem.
+unsafe fn append_sync_section(menu: HMENU) {
+    let info = |text: &str| {
+        let w = wide(text);
+        AppendMenuW(menu, MF_STRING | MF_DISABLED | MF_GRAYED, 0, w.as_ptr());
+    };
+    let item = |id: u32, text: &str| {
+        let w = wide(text);
+        AppendMenuW(menu, MF_STRING, id as usize, w.as_ptr());
+    };
+    info("Sincronización con Google Drive");
+    if !crate::sync::is_configured() {
+        info("No disponible en esta compilación");
+    } else if crate::sync::is_connected() {
+        let (email, status) = crate::sync::status();
+        info(&format!("Cuenta: {email}"));
+        info(&status);
+        item(ID_SYNC_NOW, "Sincronizar ahora");
+        item(ID_SYNC_DISCONNECT, "Desconectar…");
+    } else if crate::sync::is_signing_in() {
+        info("Esperando al navegador…");
+        item(ID_SYNC_CANCEL, "Cancelar la conexión");
+    } else {
+        item(ID_SYNC_CONNECT, "Conectar con mi cuenta de Google…");
     }
 }
 
@@ -327,6 +382,10 @@ fn handle_command(hwnd: HWND, id: u32) {
         ID_DESKTOP_MENU => toggle_desktop_menu(),
         ID_AUTOSTART => shell::set_autostart(!shell::is_autostart_enabled()),
         ID_EXIT => exit_app(hwnd),
+        ID_SYNC_CONNECT => crate::sync::begin_sign_in(),
+        ID_SYNC_NOW => crate::sync::sync_now(),
+        ID_SYNC_DISCONNECT => crate::sync::disconnect(),
+        ID_SYNC_CANCEL => crate::sync::cancel_sign_in(),
         _ => {}
     }
 }
@@ -363,6 +422,18 @@ unsafe extern "system" fn controller_wndproc(hwnd: HWND, msg: u32, wparam: WPARA
             // Con un respiro: si fue Explorer reiniciándose, Progman
             // tarda un momento en volver a existir.
             SetTimer(hwnd, TIMER_RECREATE, 1500, None);
+            0
+        }
+        crate::sync::WM_APP_SYNC_DONE => {
+            crate::sync::on_done(lparam);
+            0
+        }
+        crate::sync::WM_APP_SIGNIN_DONE => {
+            crate::sync::on_sign_in_done(lparam);
+            0
+        }
+        WM_TIMER if wparam == crate::sync::TIMER_SYNC_SOON || wparam == crate::sync::TIMER_SYNC_POLL => {
+            crate::sync::on_timer(wparam);
             0
         }
         WM_TIMER if wparam == TIMER_RECREATE => {

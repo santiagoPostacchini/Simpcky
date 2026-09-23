@@ -1,12 +1,16 @@
-//! Persistencia de las notas en `%APPDATA%\Simpcky\notes.json`.
+//! Persistencia en `%APPDATA%\Simpcky\`:
+//! - `notes.json`: las notas;
+//! - `settings.json`: preferencias de la app (tema, etc.);
+//! - `sync.json`: estado de la sincronización (id del archivo en Drive,
+//!   cuenta conectada) y las "lápidas" de las notas borradas.
 //!
-//! Formato deliberadamente casero (sin serde): el esquema es plano y fijo,
-//! y así el binario no carga un framework de serialización entero solo para
-//! guardar una lista de notas. Ver `artifact-type/reference/...` (diseño) /
-//! la especificación técnica del lienzo para el porqué de cada campo.
+//! JSON escrito a mano (ver `json.rs`): el esquema es chico y fijo, y así
+//! el binario no carga un framework de serialización entero.
 
 use std::fs;
 use std::path::PathBuf;
+
+use crate::json::{self, Json};
 
 /// Modo de enrollado de una nota. `Manual` es siempre el valor por
 /// defecto de una nota nueva: nunca se enrolla sola salvo que el usuario
@@ -62,9 +66,24 @@ impl Layer {
     }
 }
 
-#[derive(Clone, Debug)]
+/// Las cuatro partes de una nota que se sincronizan por separado, cada
+/// una con su propia hora de última modificación (`NoteData::t`). Así,
+/// mover una nota en una compu nunca pisa lo que se escribió en ella en
+/// otra: gana el cambio más nuevo **de cada parte**, no de la nota
+/// entera.
+pub const CONTENT: usize = 0; // nombre y texto
+pub const COLOR: usize = 1;
+pub const GEOM: usize = 2; // posición y tamaño
+pub const STATE: usize = 3; // capa, modo de enrollado, enrollada
+pub const PARTS: usize = 4;
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct NoteData {
+    /// Número local de esta compu (lo usa la ventana). No se sincroniza:
+    /// cada compu numera sus notas a su manera.
     pub id: u32,
+    /// Identidad de la nota en todas las compus: 128 bits al azar.
+    pub uid: String,
     pub x: i32,
     pub y: i32,
     pub w: i32,
@@ -72,7 +91,7 @@ pub struct NoteData {
     /// es `false`. Al enrollar, la ventana baja a la altura del
     /// encabezado sin perder este valor, así se restaura tal cual.
     pub h: i32,
-    pub color: u8, // índice de paleta 0..=5, ver note::PALETTE
+    pub color: u8, // índice de paleta 0..=5, ver theme.rs
     pub layer: Layer,
     pub roll_mode: RollMode,
     pub rolled: bool,
@@ -80,31 +99,92 @@ pub struct NoteData {
     /// línea del texto (y si tampoco hay, "Nota").
     pub title: String,
     pub text: String,
+    /// Última modificación de cada parte (ms desde 1970; ver `CONTENT`,
+    /// `COLOR`, `GEOM`, `STATE`). 0 = nunca se guardó (nota recién
+    /// creada: `app::save_all` le pone la hora).
+    pub t: [u64; PARTS],
 }
 
 impl NoteData {
     pub fn new(id: u32, x: i32, y: i32, color: u8, roll_mode: RollMode) -> Self {
         NoteData {
             id,
+            uid: new_uid(),
             x,
             y,
             w: 280,
             h: 320,
             color,
-            // Por defecto, "widget de escritorio": ancla detrás de
-            // los íconos y sobrevive a "Mostrar escritorio". Solo
-            // "Siempre encima" la saca de ahí y la convierte en una
-            // ventana normal con botón en la barra de tareas.
+            // Por defecto, "widget de escritorio": anclada al escritorio,
+            // sobrevive a "Mostrar escritorio". Solo "Siempre encima" la
+            // saca de ahí y la convierte en una ventana normal con botón
+            // en la barra de tareas.
             layer: Layer::Desktop,
             roll_mode,
             rolled: false,
             title: String::new(),
             text: String::new(),
+            t: [0; PARTS],
         }
+    }
+
+    /// El valor de cada parte, como texto comparable: si cambia, esa
+    /// parte cambió. Deja afuera lo que no es un cambio de verdad:
+    /// `Normal` y `Desktop` son la misma capa, y en modo Auto la nota se
+    /// enrolla y desenrolla sola con el mouse (eso no se sincroniza).
+    pub fn parts(&self) -> [String; PARTS] {
+        let top = self.layer == Layer::AlwaysOnTop;
+        let rolled = self.roll_mode == RollMode::Manual && self.rolled;
+        [
+            format!("{}\u{1}{}", self.title, self.text),
+            self.color.to_string(),
+            format!("{},{},{},{}", self.x, self.y, self.w, self.h),
+            format!("{top},{},{rolled}", self.roll_mode.as_u8()),
+        ]
+    }
+
+    /// Copia la parte `part` (valores y hora) de `other`.
+    pub fn take_part(&mut self, other: &NoteData, part: usize) {
+        match part {
+            CONTENT => {
+                self.title = other.title.clone();
+                self.text = other.text.clone();
+            }
+            COLOR => self.color = other.color,
+            GEOM => {
+                self.x = other.x;
+                self.y = other.y;
+                self.w = other.w;
+                self.h = other.h;
+            }
+            STATE => {
+                self.layer = other.layer;
+                self.roll_mode = other.roll_mode;
+                self.rolled = other.rolled;
+            }
+            _ => unreachable!("parte de nota inexistente: {part}"),
+        }
+        self.t[part] = other.t[part];
+    }
+
+    /// Cuándo se tocó la nota por última vez (cualquier parte).
+    pub fn last_change(&self) -> u64 {
+        self.t.iter().copied().max().unwrap_or(0)
     }
 }
 
-fn data_dir() -> PathBuf {
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+pub fn new_uid() -> String {
+    crate::crypto::hex(&crate::crypto::random_bytes(16))
+}
+
+pub fn data_dir() -> PathBuf {
     let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(base).join("Simpcky")
 }
@@ -121,20 +201,86 @@ pub fn is_first_run() -> bool {
 }
 
 pub fn load_notes() -> Vec<NoteData> {
-    let path = notes_path();
-    let text = match fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(_) => return Vec::new(),
-    };
-    parse_notes(&text)
+    let Ok(text) = fs::read_to_string(notes_path()) else { return Vec::new() };
+    parse_notes(&text, now_ms())
+}
+
+fn parse_notes(text: &str, now: u64) -> Vec<NoteData> {
+    let Some(root) = json::parse(text) else { return Vec::new() };
+    root.as_array()
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|item| {
+            let mut n = note_from_json(item)?;
+            // Notas de antes de la sincronización: se les da identidad
+            // (y se guarda enseguida, ver main.rs) y una hora de
+            // modificación.
+            if n.uid.is_empty() {
+                n.uid = new_uid();
+            }
+            if n.t == [0; PARTS] {
+                n.t = [now; PARTS];
+            }
+            Some(n)
+        })
+        .collect()
 }
 
 pub fn save_notes(notes: &[NoteData]) {
-    let dir = data_dir();
-    if fs::create_dir_all(&dir).is_err() {
+    if fs::create_dir_all(data_dir()).is_err() {
         return;
     }
-    write_atomic(&notes_path(), &write_notes(notes));
+    let body: Vec<String> = notes.iter().map(|n| format!("  {}", note_json(n, true))).collect();
+    write_atomic(&notes_path(), &format!("[\n{}\n]", body.join(",\n")));
+}
+
+/// Una nota en JSON. `local`: incluir el número local (`notes.json`) o
+/// no (el documento que se sube a Drive).
+pub fn note_json(n: &NoteData, local: bool) -> String {
+    let id = if local { format!("\"id\":{},", n.id) } else { String::new() };
+    format!(
+        "{{{id}\"uid\":\"{}\",\"x\":{},\"y\":{},\"w\":{},\"h\":{},\"color\":{},\"layer\":{},\"rollMode\":{},\"rolled\":{},\"title\":\"{}\",\"text\":\"{}\",\"t\":[{},{},{},{}]}}",
+        json::escape(&n.uid),
+        n.x,
+        n.y,
+        n.w,
+        n.h,
+        n.color,
+        n.layer.as_u8(),
+        n.roll_mode.as_u8(),
+        n.rolled,
+        json::escape(&n.title),
+        json::escape(&n.text),
+        n.t[0],
+        n.t[1],
+        n.t[2],
+        n.t[3],
+    )
+}
+
+pub fn note_from_json(j: &Json) -> Option<NoteData> {
+    j.get("text")?; // no es una nota
+    let mut t = [0u64; PARTS];
+    if let Some(arr) = j.get("t").and_then(Json::as_array) {
+        for (i, v) in arr.iter().take(PARTS).enumerate() {
+            t[i] = v.as_f64().unwrap_or(0.0).max(0.0) as u64;
+        }
+    }
+    Some(NoteData {
+        id: j.i32_or("id", 0) as u32,
+        uid: j.str_or("uid", ""),
+        x: j.i32_or("x", 80),
+        y: j.i32_or("y", 80),
+        w: j.i32_or("w", 280),
+        h: j.i32_or("h", 320),
+        color: j.u8_or("color", 0),
+        layer: Layer::from_u8(j.u8_or("layer", 1)),
+        roll_mode: RollMode::from_u8(j.u8_or("rollMode", 0)),
+        rolled: j.bool_or("rolled", false),
+        title: j.str_or("title", ""),
+        text: j.str_or("text", ""),
+        t,
+    })
 }
 
 /// Escribe a un archivo temporal y lo renombra encima del real: si la
@@ -148,293 +294,12 @@ fn write_atomic(path: &std::path::Path, contents: &str) {
 }
 
 // ---------------------------------------------------------------------
-// Escritura JSON (a mano: el esquema es fijo y plano)
-// ---------------------------------------------------------------------
-
-fn escape_json(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 8);
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-fn write_notes(notes: &[NoteData]) -> String {
-    let mut out = String::from("[\n");
-    for (i, n) in notes.iter().enumerate() {
-        out.push_str("  {");
-        out.push_str(&format!("\"id\":{},", n.id));
-        out.push_str(&format!("\"x\":{},", n.x));
-        out.push_str(&format!("\"y\":{},", n.y));
-        out.push_str(&format!("\"w\":{},", n.w));
-        out.push_str(&format!("\"h\":{},", n.h));
-        out.push_str(&format!("\"color\":{},", n.color));
-        out.push_str(&format!("\"layer\":{},", n.layer.as_u8()));
-        out.push_str(&format!("\"rollMode\":{},", n.roll_mode.as_u8()));
-        out.push_str(&format!("\"rolled\":{},", n.rolled));
-        out.push_str(&format!("\"title\":\"{}\",", escape_json(&n.title)));
-        out.push_str(&format!("\"text\":\"{}\"", escape_json(&n.text)));
-        out.push('}');
-        if i + 1 != notes.len() {
-            out.push(',');
-        }
-        out.push('\n');
-    }
-    out.push(']');
-    out
-}
-
-// ---------------------------------------------------------------------
-// Lectura JSON: parser recursivo mínimo, suficiente para un array plano
-// de objetos con valores string/number/bool.
-// ---------------------------------------------------------------------
-
-enum Json {
-    Num(f64),
-    Str(String),
-    Bool(bool),
-    Arr(Vec<Json>),
-    Obj(Vec<(String, Json)>),
-    Null,
-}
-
-struct P<'a> {
-    b: &'a [u8],
-    i: usize,
-}
-
-impl<'a> P<'a> {
-    fn new(s: &'a str) -> Self {
-        P { b: s.as_bytes(), i: 0 }
-    }
-
-    fn skip_ws(&mut self) {
-        while self.i < self.b.len() {
-            match self.b[self.i] {
-                b' ' | b'\t' | b'\r' | b'\n' => self.i += 1,
-                _ => break,
-            }
-        }
-    }
-
-    fn peek(&self) -> Option<u8> {
-        self.b.get(self.i).copied()
-    }
-
-    fn parse_value(&mut self) -> Option<Json> {
-        self.skip_ws();
-        match self.peek()? {
-            b'{' => self.parse_obj(),
-            b'[' => self.parse_arr(),
-            b'"' => self.parse_str().map(Json::Str),
-            b't' => {
-                self.i += 4;
-                Some(Json::Bool(true))
-            }
-            b'f' => {
-                self.i += 5;
-                Some(Json::Bool(false))
-            }
-            b'n' => {
-                self.i += 4;
-                Some(Json::Null)
-            }
-            _ => self.parse_num(),
-        }
-    }
-
-    fn parse_obj(&mut self) -> Option<Json> {
-        self.i += 1; // {
-        let mut fields = Vec::new();
-        self.skip_ws();
-        if self.peek() == Some(b'}') {
-            self.i += 1;
-            return Some(Json::Obj(fields));
-        }
-        loop {
-            self.skip_ws();
-            let key = self.parse_str()?;
-            self.skip_ws();
-            if self.peek() != Some(b':') {
-                return None;
-            }
-            self.i += 1;
-            let val = self.parse_value()?;
-            fields.push((key, val));
-            self.skip_ws();
-            match self.peek()? {
-                b',' => {
-                    self.i += 1;
-                }
-                b'}' => {
-                    self.i += 1;
-                    break;
-                }
-                _ => return None,
-            }
-        }
-        Some(Json::Obj(fields))
-    }
-
-    fn parse_arr(&mut self) -> Option<Json> {
-        self.i += 1; // [
-        let mut items = Vec::new();
-        self.skip_ws();
-        if self.peek() == Some(b']') {
-            self.i += 1;
-            return Some(Json::Arr(items));
-        }
-        loop {
-            let val = self.parse_value()?;
-            items.push(val);
-            self.skip_ws();
-            match self.peek()? {
-                b',' => {
-                    self.i += 1;
-                }
-                b']' => {
-                    self.i += 1;
-                    break;
-                }
-                _ => return None,
-            }
-        }
-        Some(Json::Arr(items))
-    }
-
-    /// Lee un string JSON. Los bytes se juntan tal cual y se decodifican
-    /// como UTF-8 al final: antes cada byte se convertía por separado a
-    /// `char`, y cualquier tilde o eñe volvía como basura ("Ã±") al
-    /// recargar — y empeoraba con cada guardado.
-    fn parse_str(&mut self) -> Option<String> {
-        self.skip_ws();
-        if self.peek() != Some(b'"') {
-            return None;
-        }
-        self.i += 1;
-        let mut out: Vec<u8> = Vec::new();
-        loop {
-            let c = *self.b.get(self.i)?;
-            self.i += 1;
-            match c {
-                b'"' => break,
-                b'\\' => {
-                    let esc = *self.b.get(self.i)?;
-                    self.i += 1;
-                    match esc {
-                        b'n' => out.push(b'\n'),
-                        b'r' => out.push(b'\r'),
-                        b't' => out.push(b'\t'),
-                        b'u' => {
-                            let hex = self.b.get(self.i..self.i + 4)?;
-                            let hex = std::str::from_utf8(hex).ok()?;
-                            let cp = u32::from_str_radix(hex, 16).ok()?;
-                            self.i += 4;
-                            if let Some(ch) = char::from_u32(cp) {
-                                let mut buf = [0u8; 4];
-                                out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
-                            }
-                        }
-                        other => out.push(other), // \" \\ \/
-                    }
-                }
-                _ => out.push(c),
-            }
-        }
-        Some(String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
-    }
-
-    fn parse_num(&mut self) -> Option<Json> {
-        let start = self.i;
-        while let Some(c) = self.peek() {
-            if c.is_ascii_digit() || c == b'-' || c == b'+' || c == b'.' || c == b'e' || c == b'E' {
-                self.i += 1;
-            } else {
-                break;
-            }
-        }
-        let s = std::str::from_utf8(&self.b[start..self.i]).ok()?;
-        s.parse::<f64>().ok().map(Json::Num)
-    }
-}
-
-fn obj_get<'a>(fields: &'a [(String, Json)], key: &str) -> Option<&'a Json> {
-    fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)
-}
-
-fn as_i32(v: Option<&Json>, default: i32) -> i32 {
-    match v {
-        Some(Json::Num(n)) => *n as i32,
-        _ => default,
-    }
-}
-
-fn as_u8(v: Option<&Json>, default: u8) -> u8 {
-    match v {
-        Some(Json::Num(n)) => *n as u8,
-        _ => default,
-    }
-}
-
-fn as_bool(v: Option<&Json>, default: bool) -> bool {
-    match v {
-        Some(Json::Bool(b)) => *b,
-        _ => default,
-    }
-}
-
-fn as_str(v: Option<&Json>) -> String {
-    match v {
-        Some(Json::Str(s)) => s.clone(),
-        _ => String::new(),
-    }
-}
-
-fn parse_notes(text: &str) -> Vec<NoteData> {
-    let mut p = P::new(text);
-    let root = match p.parse_value() {
-        Some(v) => v,
-        None => return Vec::new(),
-    };
-    let items = match root {
-        Json::Arr(items) => items,
-        _ => return Vec::new(),
-    };
-    let mut out = Vec::new();
-    for item in items {
-        if let Json::Obj(fields) = item {
-            out.push(NoteData {
-                id: as_i32(obj_get(&fields, "id"), 0) as u32,
-                x: as_i32(obj_get(&fields, "x"), 80),
-                y: as_i32(obj_get(&fields, "y"), 80),
-                w: as_i32(obj_get(&fields, "w"), 260),
-                h: as_i32(obj_get(&fields, "h"), 280),
-                color: as_u8(obj_get(&fields, "color"), 0),
-                layer: Layer::from_u8(as_u8(obj_get(&fields, "layer"), 0)),
-                roll_mode: RollMode::from_u8(as_u8(obj_get(&fields, "rollMode"), 0)),
-                rolled: as_bool(obj_get(&fields, "rolled"), false),
-                title: as_str(obj_get(&fields, "title")),
-                text: as_str(obj_get(&fields, "text")),
-            });
-        }
-    }
-    out
-}
-
-// ---------------------------------------------------------------------
 // Ajustes de la app (`settings.json`, al lado de `notes.json`)
 // ---------------------------------------------------------------------
 
 /// Preferencias globales. Van en un archivo aparte para que un
 /// `notes.json` viejo (que es solo un array) siga leyéndose tal cual.
+/// No se sincronizan: cada compu tiene las suyas.
 #[derive(Clone, Copy, Debug)]
 pub struct Settings {
     pub dark: bool,
@@ -452,14 +317,11 @@ fn settings_path() -> PathBuf {
 /// `None` si todavía no hay ajustes guardados (primera vez con esta
 /// versión): el que llama decide los valores iniciales.
 pub fn load_settings() -> Option<Settings> {
-    let text = fs::read_to_string(settings_path()).ok()?;
-    let Json::Obj(fields) = P::new(&text).parse_value()? else {
-        return None;
-    };
+    let j = json::parse(&fs::read_to_string(settings_path()).ok()?)?;
     Some(Settings {
-        dark: as_bool(obj_get(&fields, "dark"), false),
-        default_roll_mode: RollMode::from_u8(as_u8(obj_get(&fields, "defaultRollMode"), 0)),
-        desktop_menu: as_bool(obj_get(&fields, "desktopMenu"), true),
+        dark: j.bool_or("dark", false),
+        default_roll_mode: RollMode::from_u8(j.u8_or("defaultRollMode", 0)),
+        desktop_menu: j.bool_or("desktopMenu", true),
     })
 }
 
@@ -474,4 +336,130 @@ pub fn save_settings(s: &Settings) {
         s.desktop_menu
     );
     write_atomic(&settings_path(), &json);
+}
+
+// ---------------------------------------------------------------------
+// Estado de la sincronización (`sync.json`)
+// ---------------------------------------------------------------------
+
+/// "Lápida" de una nota borrada: sin esto, la otra compu (que todavía
+/// la tiene) la volvería a subir y la nota resucitaría.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tomb {
+    pub uid: String,
+    pub at: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SyncState {
+    /// Cuenta conectada (vacío = sincronización apagada).
+    pub email: String,
+    /// Id del archivo en Drive y MD5 de la última versión que se vio.
+    pub file_id: String,
+    pub md5: String,
+    /// Última sincronización exitosa (ms desde 1970).
+    pub last_sync: u64,
+    /// Notas borradas en esta compu o en otras. Se registran aunque la
+    /// sincronización esté apagada: si se prende más tarde, lo borrado
+    /// mientras tanto no tiene que volver.
+    pub tombs: Vec<Tomb>,
+}
+
+fn sync_path() -> PathBuf {
+    data_dir().join("sync.json")
+}
+
+pub fn load_sync_state() -> SyncState {
+    let Some(j) = fs::read_to_string(sync_path()).ok().and_then(|t| json::parse(&t)) else {
+        return SyncState::default();
+    };
+    SyncState {
+        email: j.str_or("email", ""),
+        file_id: j.str_or("fileId", ""),
+        md5: j.str_or("md5", ""),
+        last_sync: j.u64_or("lastSync", 0),
+        tombs: tombs_from_json(j.get("deleted")),
+    }
+}
+
+pub fn save_sync_state(s: &SyncState) {
+    if fs::create_dir_all(data_dir()).is_err() {
+        return;
+    }
+    let json = format!(
+        "{{\"email\":\"{}\",\"fileId\":\"{}\",\"md5\":\"{}\",\"lastSync\":{},\"deleted\":{}}}\n",
+        json::escape(&s.email),
+        json::escape(&s.file_id),
+        json::escape(&s.md5),
+        s.last_sync,
+        tombs_json(&s.tombs)
+    );
+    write_atomic(&sync_path(), &json);
+}
+
+pub fn tombs_json(tombs: &[Tomb]) -> String {
+    let items: Vec<String> =
+        tombs.iter().map(|t| format!("{{\"uid\":\"{}\",\"at\":{}}}", json::escape(&t.uid), t.at)).collect();
+    format!("[{}]", items.join(","))
+}
+
+pub fn tombs_from_json(j: Option<&Json>) -> Vec<Tomb> {
+    j.and_then(Json::as_array)
+        .unwrap_or(&[])
+        .iter()
+        .map(|t| Tomb { uid: t.str_or("uid", ""), at: t.u64_or("at", 0) })
+        .filter(|t| !t.uid.is_empty())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn note_roundtrip_keeps_everything() {
+        let mut n = NoteData::new(7, -40, 1200, 3, RollMode::Auto);
+        n.title = "Súper \"lista\"".into();
+        n.text = "leche\npan\t😀".into();
+        n.layer = Layer::AlwaysOnTop;
+        n.rolled = true;
+        n.t = [1, 2, 3, 1_790_079_957_123];
+        let back = note_from_json(&json::parse(&note_json(&n, true)).unwrap()).unwrap();
+        assert_eq!(back, n);
+        // Sin el número local (el documento de Drive), todo lo demás igual.
+        let remote = note_from_json(&json::parse(&note_json(&n, false)).unwrap()).unwrap();
+        assert_eq!(remote.id, 0);
+        assert_eq!(remote.uid, n.uid);
+    }
+
+    /// El formato de antes de la sincronización (copiado de un
+    /// `notes.json` real): tiene que cargar entero, y recibir identidad y
+    /// hora.
+    #[test]
+    fn migrates_pre_sync_format() {
+        let old = r#"[
+  {"id":1,"x":200,"y":200,"w":280,"h":320,"color":2,"layer":1,"rollMode":0,"rolled":false,"title":"","text":"Prueba anclaje al escritorio"},
+  {"id":33,"x":1560,"y":49,"w":280,"h":320,"color":2,"layer":1,"rollMode":0,"rolled":false,"title":"123124","text":"adasdasd"}
+]"#;
+        let notes = parse_notes(old, 42);
+        assert_eq!(notes.len(), 2);
+        assert_eq!((notes[0].id, notes[0].text.as_str(), notes[0].x), (1, "Prueba anclaje al escritorio", 200));
+        assert_eq!((notes[1].id, notes[1].title.as_str()), (33, "123124"));
+        assert!(notes.iter().all(|n| n.uid.len() == 32 && n.t == [42; PARTS]));
+        assert_ne!(notes[0].uid, notes[1].uid);
+        // Y lo que se guarda después se vuelve a leer igual.
+        let saved: Vec<String> = notes.iter().map(|n| note_json(n, true)).collect();
+        let again = parse_notes(&format!("[{}]", saved.join(",")), 99);
+        assert_eq!(again, notes);
+    }
+
+    #[test]
+    fn parts_ignore_non_changes() {
+        let mut a = NoteData::new(1, 0, 0, 0, RollMode::Auto);
+        let mut b = a.clone();
+        a.layer = Layer::Normal;
+        b.layer = Layer::Desktop;
+        b.rolled = true; // en modo Auto, enrollarse con el mouse no es un cambio
+        assert_eq!(a.parts(), b.parts());
+    }
 }

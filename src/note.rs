@@ -155,6 +155,12 @@ pub fn create_note(data: NoteData) -> HWND {
 
     let class_name = wide(NOTE_CLASS);
     let h = if data.rolled { HEADER_H } else { data.h };
+    // Donde se dibuja, no donde "vive": una nota que viene de otra compu
+    // (o de un monitor que ya no está) puede tener coordenadas fuera de
+    // esta pantalla. Se muestra ajustada, pero el dato queda intacto:
+    // si se lo reescribiera, esta compu le "corregiría" la posición a
+    // las demás en la próxima sincronización.
+    let (x, y) = clamp_to_work_area(data.x, data.y, data.w, HEADER_H);
     // Siempre encima: ventana normal, con botón en la barra de tareas
     // (WS_EX_APPWINDOW) y por encima de todo (WS_EX_TOPMOST). Widget
     // de escritorio: oculta de la barra de tareas (WS_EX_TOOLWINDOW) —
@@ -172,8 +178,8 @@ pub fn create_note(data: NoteData) -> HWND {
             class_name.as_ptr(),
             null(),
             WS_POPUP | WS_VISIBLE | WS_CLIPCHILDREN,
-            data.x,
-            data.y,
+            x,
+            y,
             data.w,
             h,
             null_mut(),
@@ -184,7 +190,13 @@ pub fn create_note(data: NoteData) -> HWND {
     };
 
     if hwnd.is_null() {
-        app().lock().unwrap().notes.remove(&id);
+        // No se pudo crear la ventana (Windows sin recursos, o el
+        // escritorio a mitad de reiniciarse). Los datos NO se tiran:
+        // antes esto borraba la nota del mapa, el guardado siguiente la
+        // borraba de `notes.json`, y con la sincronización encima esa
+        // "desaparición" viajaría como borrado a todas las compus. La
+        // nota queda sin ventana (como cuando Explorer se reinicia) y se
+        // vuelve a intentar en el próximo `recreate_lost` o arranque.
     } else {
         // WS_POPUP no entra en el redondeo automático de esquinas de
         // Windows 11 (eso solo lo aplica a ventanas "normales" con
@@ -826,6 +838,10 @@ fn duplicate_note(hwnd: HWND) {
     };
     let mut copy = source;
     copy.id = crate::app::next_note_id();
+    // Otra nota, no la misma: identidad nueva y sin historia (save_all
+    // le pone la hora al guardarla).
+    copy.uid = crate::persist::new_uid();
+    copy.t = [0; crate::persist::PARTS];
     copy.x += 28;
     copy.y += 28;
     copy.rolled = false;
@@ -887,6 +903,13 @@ fn set_layer(hwnd: HWND, layer: Layer) {
         return;
     }
 
+    switch_layer_window(hwnd, to_top);
+    save_all();
+}
+
+/// Lo que cambia en la ventana al pasar entre "siempre encima" y widget
+/// de escritorio (sin guardar nada: eso lo decide el que llama).
+fn switch_layer_window(hwnd: HWND, to_top: bool) {
     unsafe {
         if to_top {
             KillTimer(hwnd, TIMER_DESKTOP_WATCH);
@@ -900,7 +923,81 @@ fn set_layer(hwnd: HWND, layer: Layer) {
         apply_taskbar_visibility(hwnd, if to_top { Layer::AlwaysOnTop } else { Layer::Desktop });
         InvalidateRect(hwnd, null(), 1);
     }
-    save_all();
+}
+
+/// Una nota cambió en otra compu (ver `sync::apply`): se reemplazan sus
+/// datos y se actualiza la ventana en lo que haga falta. No es un cambio
+/// local: se marca como ya guardado, así no se le pone la hora de ahora
+/// y no vuelve a subir.
+pub fn apply_remote(new: NoteData) {
+    let id = new.id;
+    crate::app::mark_saved(&new);
+    let (hwnd, edit, old) = {
+        let mut a = app().lock().unwrap();
+        let Some(nr) = a.notes.get_mut(&id) else { return };
+        let old = std::mem::replace(&mut nr.data, new.clone());
+        (nr.hwnd as HWND, nr.edit as HWND, old)
+    };
+    if hwnd.is_null() {
+        return; // sin ventana ahora: se va a crear con los datos nuevos
+    }
+    unsafe {
+        if !edit.is_null() && old.text != new.text {
+            let text = wide(&new.text);
+            SendMessageW(edit, WM_SETTEXT, 0, text.as_ptr() as isize);
+        }
+        if !edit.is_null() && (old.text != new.text || old.color != new.color) {
+            apply_body_style(edit, new.color);
+        }
+        let (was_top, to_top) = (old.layer == Layer::AlwaysOnTop, new.layer == Layer::AlwaysOnTop);
+        if was_top != to_top {
+            if !to_top {
+                // Si estaba asomada, deja de estarlo: vuelve al escritorio.
+                let mut a = app().lock().unwrap();
+                if let Some(nr) = a.notes.get_mut(&id) {
+                    nr.peeking = false;
+                }
+            }
+            switch_layer_window(hwnd, to_top);
+        }
+        if old.roll_mode != new.roll_mode {
+            if new.roll_mode == RollMode::Auto {
+                SetTimer(hwnd, TIMER_HOVER, HOVER_POLL_MS, None);
+            } else {
+                KillTimer(hwnd, TIMER_HOVER);
+            }
+        }
+        if (old.x, old.y) != (new.x, new.y) {
+            let (x, y) = clamp_to_work_area(new.x, new.y, new.w, HEADER_H);
+            crate::desktop::move_to_screen(hwnd, x, y);
+        }
+        if (old.w, old.h, old.rolled) != (new.w, new.h, new.rolled) {
+            apply_rolled_state(hwnd, edit, new.w, new.h, new.rolled);
+        }
+        InvalidateRect(hwnd, null(), 1);
+    }
+}
+
+/// La nota se borró en otra compu: se va de acá también, sin preguntar
+/// (la confirmación ya la dio el usuario allá).
+pub fn delete_silently(id: u32) {
+    crate::app::forget_saved(id);
+    let hwnd = {
+        let mut a = app().lock().unwrap();
+        match a.notes.get_mut(&id) {
+            Some(nr) => {
+                nr.deleting = true;
+                nr.hwnd as HWND
+            }
+            None => return,
+        }
+    };
+    if hwnd.is_null() {
+        app().lock().unwrap().notes.remove(&id);
+        save_all();
+    } else {
+        unsafe { DestroyWindow(hwnd) };
+    }
 }
 
 /// Ancla la nota detrás de los íconos y deja al vigilante encargado de
@@ -1142,6 +1239,45 @@ pub fn recreate_lost() {
     }
 }
 
+/// El texto del RichEdit, con los saltos de línea siempre como `\n`:
+/// RichEdit los devuelve como `\r\n` (o `\r`), y si el mismo texto
+/// pudiera quedar guardado de dos formas, cada compu lo vería como un
+/// cambio y se lo pasarían de una a otra para siempre.
+fn read_text(edit: HWND) -> String {
+    let len = unsafe { SendMessageW(edit, WM_GETTEXTLENGTH, 0, 0) } as usize;
+    let mut buf: Vec<u16> = vec![0u16; len + 1];
+    unsafe { SendMessageW(edit, WM_GETTEXT, buf.len(), buf.as_mut_ptr() as isize) };
+    from_wide(&buf).replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// Pasa a los datos lo que haya en los cuadros de texto que el
+/// autoguardado todavía no levantó (se llama antes de sincronizar: lo
+/// que se está escribiendo en este momento también cuenta). Un solo
+/// guardado al final, no uno por nota.
+pub fn commit_all_text() {
+    let edits: Vec<(u32, HWND)> = {
+        let a = app().lock().unwrap();
+        a.notes.values().filter(|nr| nr.edit != 0).map(|nr| (nr.data.id, nr.edit as HWND)).collect()
+    };
+    let texts: Vec<(u32, String)> = edits.into_iter().map(|(id, edit)| (id, read_text(edit))).collect();
+    let changed = {
+        let mut a = app().lock().unwrap();
+        let mut changed = false;
+        for (id, text) in texts {
+            if let Some(nr) = a.notes.get_mut(&id) {
+                if nr.data.text != text {
+                    nr.data.text = text;
+                    changed = true;
+                }
+            }
+        }
+        changed
+    };
+    if changed {
+        save_all();
+    }
+}
+
 fn commit_text_and_save(hwnd: HWND) {
     let id = note_id(hwnd);
     let edit: HWND = {
@@ -1154,10 +1290,7 @@ fn commit_text_and_save(hwnd: HWND) {
     if edit.is_null() {
         return;
     }
-    let len = unsafe { SendMessageW(edit, WM_GETTEXTLENGTH, 0, 0) } as usize;
-    let mut buf: Vec<u16> = vec![0u16; len + 1];
-    unsafe { SendMessageW(edit, WM_GETTEXT, buf.len(), buf.as_mut_ptr() as isize) };
-    let text = from_wide(&buf);
+    let text = read_text(edit);
     {
         let mut a = app().lock().unwrap();
         if let Some(nr) = a.notes.get_mut(&id) {
@@ -1291,12 +1424,7 @@ fn on_destroy(hwnd: HWND) {
     let text = if edit.is_null() {
         None
     } else {
-        unsafe {
-            let len = SendMessageW(edit, WM_GETTEXTLENGTH, 0, 0) as usize;
-            let mut buf: Vec<u16> = vec![0u16; len + 1];
-            SendMessageW(edit, WM_GETTEXT, buf.len(), buf.as_mut_ptr() as isize);
-            Some(from_wide(&buf))
-        }
+        Some(read_text(edit))
     };
     {
         let mut a = app().lock().unwrap();

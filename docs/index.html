@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simpcky — notas adhesivas para el escritorio de Windows</title>
+<meta name="description" content="Notas adhesivas ultraligeras que viven en el escritorio de Windows 11, con sincronización opcional entre compus a través de tu Google Drive.">
+<link rel="icon" type="image/png" href="assets/favicon.png">
+<link rel="stylesheet" href="assets/estilo.css">
+</head>
+<body>
+<div class="wrap">
+
+  <header class="site">
+    <img src="assets/icono.png" alt="" width="48" height="48">
+    <a class="brand" href="./">Simpcky</a>
+    <nav>
+      <a href="privacidad.html">Privacidad</a>
+      <a data-gh="" href="https://github.com/">GitHub</a>
+    </nav>
+  </header>
+
+  <main>
+    <h1>Notas adhesivas que viven en tu escritorio</h1>
+    <p class="lead">
+      Simpcky es una app chiquita para Windows 11: tus notas quedan pegadas
+      al escritorio como widgets, con la forma de siempre de una nota
+      adhesiva, sin tapar lo que estás usando. Nativa, de menos de 400&nbsp;KB,
+      sin publicidad y sin telemetría.
+    </p>
+
+    <div class="actions">
+      <a class="button" data-gh="/releases/latest" href="https://github.com/">Descargar</a>
+      <a class="button secondary" data-gh="" href="https://github.com/">Código en GitHub</a>
+    </div>
+
+    <div class="grid">
+      <div class="note"><div class="bar"></div><div class="body">
+        <h3>En el escritorio</h3>
+        <p>Cada nota es un widget: queda detrás de tus ventanas y aparece con "Mostrar escritorio".</p>
+      </div></div>
+      <div class="note pink"><div class="bar"></div><div class="body">
+        <h3>Se enrolla cuando vos querés</h3>
+        <p>Enrollado manual por defecto. Si preferís, automático al quitar el mouse.</p>
+      </div></div>
+      <div class="note green"><div class="bar"></div><div class="body">
+        <h3>Tus compus, al día</h3>
+        <p>Opcional: con tu cuenta de Google, las mismas notas en la notebook y en la de escritorio.</p>
+      </div></div>
+      <div class="note blue"><div class="bar"></div><div class="body">
+        <h3>Claro u oscuro</h3>
+        <p>Arranca con el tema de Windows, y lo cambiás con un clic.</p>
+      </div></div>
+      <div class="note violet"><div class="bar"></div><div class="body">
+        <h3>Todas tus notas</h3>
+        <p>Un buscador y una grilla para encontrar cualquiera, y arrastrarla al escritorio.</p>
+      </div></div>
+      <div class="note slate"><div class="bar"></div><div class="body">
+        <h3>Liviana de verdad</h3>
+        <p>Rust y Win32 puro: sin Electron ni un navegador escondido. Arranca al instante.</p>
+      </div></div>
+    </div>
+
+    <h2>Tus notas son tuyas</h2>
+    <p>
+      Las notas se guardan en tu compu. Si activás la sincronización, viajan
+      a una carpeta oculta de <em>tu propio</em> Google Drive que solo ve
+      Simpcky, directo desde tu compu: no hay servidores de por medio, y la
+      app no puede ver ningún otro archivo de tu Drive.
+      Todos los detalles están en la <a href="privacidad.html">política de privacidad</a>.
+    </p>
+
+    <h2>Requisitos</h2>
+    <p>Windows 11 de 64 bits.</p>
+  </main>
+
+  <footer class="site">
+    <span>© 2026 Simpcky</span>
+    <a href="privacidad.html">Política de privacidad</a>
+    <a href="mailto:postacchinisantiago@gmail.com">postacchinisantiago@gmail.com</a>
+    <a data-gh="" href="https://github.com/">GitHub</a>
+  </footer>
+
+</div>
+<script>
+  // En GitHub Pages la dirección es USUARIO.github.io/simpcky/: de ahí
+  // salen los enlaces al repositorio, sin escribir el usuario a mano.
+  (function () {
+    var m = /^([^.]+)\.github\.io$/.exec(location.hostname);
+    if (!m) return;
+    var repo = 'https://github.com/' + m[1] + '/' + (location.pathname.split('/')[1] || 'simpcky');
+    document.querySelectorAll('[data-gh]').forEach(function (a) {
+      a.href = repo + a.getAttribute('data-gh');
+    });
+  })();
+</script>
+</body>
+</html>

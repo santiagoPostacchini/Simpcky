@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Política de privacidad — Simpcky</title>
+<meta name="description" content="Qué datos maneja Simpcky, qué hace con tu cuenta de Google si activás la sincronización, y cómo borrarlos.">
+<link rel="icon" type="image/png" href="assets/favicon.png">
+<link rel="stylesheet" href="assets/estilo.css">
+</head>
+<body>
+<div class="wrap">
+
+  <header class="site">
+    <img src="assets/icono.png" alt="" width="48" height="48">
+    <a class="brand" href="./">Simpcky</a>
+    <nav>
+      <a href="#english">English</a>
+      <a data-gh="" href="https://github.com/">GitHub</a>
+    </nav>
+  </header>
+
+  <main>
+    <h1>Política de privacidad</h1>
+    <p class="meta">Vigente desde el 22 de septiembre de 2026.</p>
+
+    <div class="note" style="margin: 24px 0 8px"><div class="bar"></div><div class="body">
+      <h3>En pocas palabras</h3>
+      <p>
+        Tus notas se guardan en tu compu. Si activás la sincronización (es
+        opcional), se guardan también en una carpeta oculta de tu propio
+        Google Drive, a la que solo accede Simpcky. No hay servidores de
+        Simpcky: los datos van directo de tu compu a Google. No hay
+        publicidad, analítica ni telemetría, y nada se vende ni se comparte.
+      </p>
+    </div></div>
+
+    <h2>Qué datos maneja Simpcky</h2>
+    <p>
+      El contenido de tus notas (nombre, texto, color, posición, tamaño y
+      estado) y las preferencias de la app (tema, modo de enrollado,
+      iniciar con Windows). Todo se guarda en tu compu, en
+      <code>%APPDATA%\Simpcky</code>. Simpcky no recolecta ningún otro
+      dato, no tiene cuentas propias y no se comunica con ningún servidor
+      propio.
+    </p>
+
+    <h2>Sincronización con Google Drive (opcional)</h2>
+    <p>
+      Si elegís "Conectar con mi cuenta de Google", iniciás sesión en tu
+      navegador, en la página de Google: Simpcky nunca ve tu contraseña.
+      La app pide únicamente estos permisos:
+    </p>
+    <table>
+      <thead><tr><th>Permiso</th><th>Para qué se usa</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>https://www.googleapis.com/auth/drive.appdata</code></td>
+          <td>
+            Guardar y leer un único archivo, <code>simpcky-notes.json</code>,
+            con tus notas, en la carpeta de datos de la app dentro de tu Drive.
+            Esa carpeta es oculta y solo la ve Simpcky. Con este permiso la app
+            <strong>no puede ver, abrir ni modificar ningún otro archivo de tu
+            Drive</strong>.
+          </td>
+        </tr>
+        <tr>
+          <td><code>openid</code>, <code>email</code></td>
+          <td>Mostrarte en el menú de la app con qué cuenta de Google estás conectado. El email no se guarda en ningún otro lugar ni se envía a nadie.</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>
+      Los datos viajan cifrados (HTTPS) directamente entre tu compu y los
+      servidores de Google. La autorización que te da Google para seguir
+      sincronizando se guarda en tu compu cifrada con tu usuario de Windows
+      (DPAPI), en <code>%APPDATA%\Simpcky\google.dat</code>.
+    </p>
+
+    <h2>Uso limitado de los datos de Google</h2>
+    <p>
+      El uso que hace Simpcky de la información recibida de las APIs de
+      Google, y su transferencia a cualquier otra app, se ajusta a la
+      <a href="https://developers.google.com/terms/api-services-user-data-policy">Política de datos del usuario de los servicios de API de Google</a>,
+      incluidos los requisitos de uso limitado. Simpcky usa esos datos solo
+      para sincronizar tus notas entre tus propias compus: no los transfiere
+      a terceros, no los usa para publicidad, no los usa para entrenar
+      modelos de inteligencia artificial, y ninguna persona los lee.
+    </p>
+
+    <h2>Cómo borrar tus datos</h2>
+    <ul>
+      <li><strong>En tu compu:</strong> desinstalá Simpcky y borrá la carpeta <code>%APPDATA%\Simpcky</code>.</li>
+      <li><strong>Dejar de sincronizar:</strong> menú de la bandeja → "Desconectar…". La app le pide a Google que invalide la autorización y la borra de tu compu. También podés quitar el acceso desde <a href="https://myaccount.google.com/connections">tu cuenta de Google</a>.</li>
+      <li><strong>Las notas guardadas en Drive:</strong> en Google Drive (web), Configuración → Administrar aplicaciones → Simpcky → Opciones → "Eliminar datos ocultos de la app".</li>
+    </ul>
+
+    <h2>Menores</h2>
+    <p>Simpcky no está dirigida a menores de 13 años.</p>
+
+    <h2>Cambios</h2>
+    <p>
+      Si esta política cambia, se actualiza esta página y su fecha de
+      vigencia. Todas las versiones anteriores quedan en el historial del
+      <a data-gh="/blob/HEAD/docs/privacidad.html" href="https://github.com/">repositorio público del proyecto</a>.
+    </p>
+
+    <h2>Contacto</h2>
+    <p><a href="mailto:postacchinisantiago@gmail.com">postacchinisantiago@gmail.com</a></p>
+
+    <hr style="border: none; border-top: 1px solid var(--line); margin: 56px 0 8px">
+
+    <section id="english" lang="en">
+      <h1>Privacy Policy</h1>
+      <p class="meta">Effective September 22, 2026.</p>
+
+      <h2>Summary</h2>
+      <p>
+        Your notes are stored on your computer. If you turn on sync (optional),
+        they are also stored in a hidden app-data folder in your own Google
+        Drive that only Simpcky can access. Simpcky has no servers: data goes
+        directly from your computer to Google. There is no advertising,
+        analytics or telemetry, and nothing is sold or shared.
+      </p>
+
+      <h2>Data Simpcky handles</h2>
+      <p>
+        The content of your notes (title, text, color, position, size and
+        state) and the app preferences, stored locally in
+        <code>%APPDATA%\Simpcky</code>. Simpcky collects no other data, has no
+        accounts of its own, and does not talk to any server of its own.
+      </p>
+
+      <h2>Google Drive sync (optional)</h2>
+      <p>
+        You sign in on Google's own page in your browser; Simpcky never sees
+        your password. The app requests only these scopes:
+      </p>
+      <ul>
+        <li>
+          <code>https://www.googleapis.com/auth/drive.appdata</code> — to store
+          and read a single file, <code>simpcky-notes.json</code>, containing
+          your notes, in the app's hidden data folder in your Drive. This scope
+          does <strong>not</strong> allow the app to see, open or modify any
+          other file in your Drive.
+        </li>
+        <li>
+          <code>openid</code>, <code>email</code> — to show you, in the app's
+          menu, which Google account is connected. The email address is not
+          stored anywhere else or sent to anyone.
+        </li>
+      </ul>
+      <p>
+        Data travels encrypted (HTTPS) directly between your computer and
+        Google's servers. The authorization that lets the app keep syncing is
+        stored on your computer, encrypted with your Windows account (DPAPI).
+      </p>
+
+      <h2>Limited Use</h2>
+      <p>
+        Simpcky's use and transfer to any other app of information received
+        from Google APIs will adhere to the
+        <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>,
+        including the Limited Use requirements. Simpcky uses that data only to
+        sync your notes across your own computers: it is not transferred to
+        third parties, not used for advertising, not used to train AI models,
+        and not read by any human.
+      </p>
+
+      <h2>Deleting your data</h2>
+      <ul>
+        <li><strong>On your computer:</strong> uninstall Simpcky and delete the <code>%APPDATA%\Simpcky</code> folder.</li>
+        <li><strong>Stop syncing:</strong> tray menu → "Desconectar…" (Disconnect). The app asks Google to revoke the authorization and deletes it from your computer. You can also remove access from <a href="https://myaccount.google.com/connections">your Google Account</a>.</li>
+        <li><strong>Notes stored in Drive:</strong> in Google Drive on the web, Settings → Manage apps → Simpcky → Options → "Delete hidden app data".</li>
+      </ul>
+
+      <h2>Children</h2>
+      <p>Simpcky is not directed to children under 13.</p>
+
+      <h2>Contact</h2>
+      <p><a href="mailto:postacchinisantiago@gmail.com">postacchinisantiago@gmail.com</a></p>
+    </section>
+  </main>
+
+  <footer class="site">
+    <span>© 2026 Simpcky</span>
+    <a href="./">Inicio</a>
+    <a data-gh="" href="https://github.com/">GitHub</a>
+  </footer>
+
+</div>
+<script>
+  // Enlaces al repositorio a partir de USUARIO.github.io (ver index.html).
+  (function () {
+    var m = /^([^.]+)\.github\.io$/.exec(location.hostname);
+    if (!m) return;
+    var repo = 'https://github.com/' + m[1] + '/' + (location.pathname.split('/')[1] || 'simpcky');
+    document.querySelectorAll('[data-gh]').forEach(function (a) {
+      a.href = repo + a.getAttribute('data-gh');
+    });
+  })();
+</script>
+</body>
+</html>

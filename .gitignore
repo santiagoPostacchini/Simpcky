@@ -1,1 +1,6 @@
 /target
+
+# Credenciales de Google para la sincronización (ver docs/sincronizacion-google.md).
+# Nunca al repositorio.
+google_client.json
+client_secret*.json
