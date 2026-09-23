@@ -41,11 +41,6 @@ pub struct AppState {
     pub next_id: u32,
     pub settings: Settings,
     pub controller_hwnd: isize,
-    /// HFONT compartido por todas las notas (Segoe UI), creado la
-    /// primera vez que hace falta.
-    pub font: isize,
-    /// HFONT semibold, más chico, para el título del encabezado.
-    pub header_font: isize,
     /// Estado de la sincronización (y lápidas de las notas borradas).
     pub sync: SyncState,
     /// Hubo cambios locales que todavía no se subieron.
@@ -66,8 +61,6 @@ pub fn init_app(hinstance: isize, settings: Settings, sync: SyncState) {
         next_id: 1,
         settings,
         controller_hwnd: 0,
-        font: 0,
-        header_font: 0,
         sync,
         sync_dirty: false,
         saved_parts: HashMap::new(),

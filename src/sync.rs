@@ -52,7 +52,13 @@ const POLL_MS: u32 = 90_000;
 /// Las lápidas se olvidan a los 90 días.
 const TOMB_TTL_MS: u64 = 90 * 24 * 3600 * 1000;
 /// Versión del formato del documento en Drive.
-const FORMAT: u32 = 1;
+/// La versión más nueva del archivo de Drive que esta app entiende. La
+/// 2 suma el formato del texto (`fmt`, ver `richtext.rs`): una versión
+/// vieja de Simpcky no lo conoce, y al reescribir el archivo lo
+/// perdería, así que ante un 2 se niega a tocarlo y pide actualizar
+/// (ver `doc_parse`). Mientras ninguna nota tenga formato se sigue
+/// escribiendo 1, y las compus sin actualizar siguen sincronizando.
+const FORMAT: u32 = 2;
 
 // -----------------------------------------------------------------
 // Fusión (pura: sin ventanas ni red, cubierta por tests)
@@ -122,7 +128,8 @@ pub fn merge(local: &[NoteData], local_tombs: &[Tomb], remote: &[NoteData], remo
 /// el mismo contenido dan exactamente el mismo texto).
 fn doc_json(notes: &[NoteData], tombs: &[Tomb]) -> String {
     let items: Vec<String> = notes.iter().map(|n| persist::note_json(n, false)).collect();
-    format!("{{\"format\":{FORMAT},\"notes\":[\n{}\n],\"deleted\":{}}}", items.join(",\n"), persist::tombs_json(tombs))
+    let format = if notes.iter().any(|n| !n.fmt.is_empty()) { FORMAT } else { 1 };
+    format!("{{\"format\":{format},\"notes\":[\n{}\n],\"deleted\":{}}}", items.join(",\n"), persist::tombs_json(tombs))
 }
 
 fn doc_parse(text: &str) -> Result<(Vec<NoteData>, Vec<Tomb>), String> {

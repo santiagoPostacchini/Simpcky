@@ -77,7 +77,7 @@ pub fn begin(note: HWND) {
         if edit.is_null() {
             return;
         }
-        SendMessageW(edit, WM_SETFONT, note::header_font() as usize, 1);
+        SendMessageW(edit, WM_SETFONT, note::header_font(note) as usize, 1);
         // El wndproc original va en GWLP_USERDATA del propio EDIT: así
         // sigue a mano aunque el estado de acá ya se haya limpiado
         // (los últimos mensajes de un EDIT, WM_DESTROY/WM_NCDESTROY,

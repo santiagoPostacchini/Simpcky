@@ -1,6 +1,9 @@
-//! Ventana de una nota individual: creación, dibujo del encabezado,
-//! arrastre, menú "⋯", enrollado (manual/auto) y autoguardado.
+//! Ventana de una nota individual: creación, encabezado (título y
+//! botones), arrastre, menú "⋯", enrollado (manual/auto) y autoguardado.
+//! El cuerpo (texto con formato, listas, emojis) es de `editor.rs`.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
 
@@ -8,22 +11,33 @@ use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Dwm::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::Graphics::GdiPlus::*;
-use windows_sys::Win32::UI::Controls::EM_SETRECT;
+use windows_sys::Win32::UI::Controls::{TOOLTIPS_CLASSW, TTF_SUBCLASS, TTM_ADDTOOLW, TTM_NEWTOOLRECTW, TTS_ALWAYSTIP, TTS_NOPREFIX, TTTOOLINFOW};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    DragDetect, GetDoubleClickTime, GetKeyState, ReleaseCapture, SetFocus, VK_CONTROL, VK_F2, VK_SHIFT,
+    DragDetect, GetFocus, GetKeyState, ReleaseCapture, SetFocus, VK_CONTROL, VK_F2, VK_MENU, VK_OEM_COMMA, VK_OEM_PERIOD, VK_OEM_PLUS,
+    VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::app::{app, save_all};
+use crate::editor;
+use crate::flyout::{self, Entry};
 use crate::persist::{Layer, NoteData, RollMode};
-use crate::win::{from_wide, wide};
+use crate::win::wide;
 
-pub const HEADER_H: i32 = 44;
+/// Alto del encabezado a 100 % (96 ppp). Todas las medidas de la nota
+/// están pensadas a 100 % y se escalan con el ppp del monitor (ver
+/// `px`): a 150 %, sin esto, el texto (que el RichEdit sí escala) quedaba
+/// enorme al lado de una barra y unos botones diminutos.
+const HEADER_H: i32 = 40;
 const RICHEDIT_ID: usize = 100;
 const TIMER_HOVER: usize = 1;
 const TIMER_AUTOSAVE: usize = 2;
 const TIMER_DESKTOP_WATCH: usize = 3;
 const HOVER_POLL_MS: u32 = 150;
+/// Mientras el mouse está sobre la nota: cuándo se fue (y hay que
+/// esconder los botones del encabezado).
+const TIMER_HOT: usize = 6;
+const HOT_POLL_MS: u32 = 100;
 const AUTOSAVE_DEBOUNCE_MS: u32 = 600;
 /// El anclaje al escritorio usa un truco no documentado de Explorer
 /// (ver `desktop.rs`) que un reinicio de `explorer.exe` puede
@@ -35,59 +49,16 @@ const DESKTOP_WATCH_MS: u32 = 4000;
 const TEXT_PAD_X: i32 = 14;
 const TEXT_PAD_Y: i32 = 12;
 
-// RichEdit (Msftedit.dll) no viene en windows-sys: son solo un puñado de
-// constantes de Winuser/Richedit.h, así que se definen a mano.
-const EM_SETBKGNDCOLOR: u32 = WM_USER + 67;
-const EM_SETCHARFORMAT: u32 = WM_USER + 68;
-const SCF_SELECTION: usize = 0x0001;
-const SCF_ALL: usize = 0x0004;
-const CFM_COLOR: u32 = 0x4000_0000;
-
-/// Réplica a mano de `CHARFORMAT2W` (Richedit.h): mismo orden y tipo de
-/// campo que el struct real de Win32, para que el layout en memoria
-/// coincida byte a byte. Solo se usa para forzar el color del texto
-/// (`dwMask = CFM_COLOR`), el resto de los campos van a cero.
-#[repr(C)]
-struct CharFormat2W {
-    cb_size: u32,
-    dw_mask: u32,
-    dw_effects: u32,
-    y_height: i32,
-    y_offset: i32,
-    cr_text_color: u32,
-    b_char_set: u8,
-    b_pitch_and_family: u8,
-    sz_face_name: [u16; 32],
-    w_weight: u16,
-    s_spacing: i16,
-    cr_back_color: u32,
-    lcid: u32,
-    dw_reserved: u32,
-    s_style: i16,
-    w_kerning: u16,
-    b_underline_type: u8,
-    b_animation: u8,
-    b_rev_author: u8,
-    b_reserved1: u8,
-}
-
 const ID_COLOR_BASE: u32 = 2000;
-const ID_ROLL_MANUAL: u32 = 2100;
-const ID_ROLL_AUTO: u32 = 2101;
-/// "Widget de escritorio" en el menú — pone `Layer::Desktop` (ver
-/// `persist::Layer`: `Normal` y `Desktop` son lo mismo por dentro).
-const ID_LAYER_DESKTOP: u32 = 2103;
-const ID_LAYER_ALWAYS_ON_TOP: u32 = 2104;
 const ID_DELETE_NOTE: u32 = 2105;
 const ID_DUPLICATE_NOTE: u32 = 2106;
-
 const ID_RENAME: u32 = 2107;
-const ID_DARK_MODE: u32 = 2108;
+/// "Siempre encima" (prendido) o widget de escritorio (apagado).
+const ID_TOGGLE_TOP: u32 = 2109;
+/// Enrollado automático (prendido) o manual (apagado).
+const ID_TOGGLE_AUTOROLL: u32 = 2110;
+const ID_ALL_NOTES: u32 = 2111;
 const TIMER_PEEK_END: usize = 4;
-/// Un clic sin arrastre en la barra (expandida) enrolla la nota, pero
-/// recién cuando pasa el tiempo de doble clic sin un segundo clic: si
-/// no, el doble clic para renombrar primero la enrollaba.
-const TIMER_BAR_CLICK: usize = 5;
 
 /// (encabezado, cuerpo, tinta) del color de la nota en el tema actual
 /// (ver `theme.rs`: la misma nota tiene su versión clara y oscura).
@@ -154,13 +125,14 @@ pub fn create_note(data: NoteData) -> HWND {
     };
 
     let class_name = wide(NOTE_CLASS);
-    let h = if data.rolled { HEADER_H } else { data.h };
+    let header = flyout::px(flyout::dpi_at(data.x, data.y), HEADER_H);
+    let h = if data.rolled { header } else { data.h };
     // Donde se dibuja, no donde "vive": una nota que viene de otra compu
     // (o de un monitor que ya no está) puede tener coordenadas fuera de
     // esta pantalla. Se muestra ajustada, pero el dato queda intacto:
     // si se lo reescribiera, esta compu le "corregiría" la posición a
     // las demás en la próxima sincronización.
-    let (x, y) = clamp_to_work_area(data.x, data.y, data.w, HEADER_H);
+    let (x, y) = clamp_to_work_area(data.x, data.y, data.w, header);
     // Siempre encima: ventana normal, con botón en la barra de tareas
     // (WS_EX_APPWINDOW) y por encima de todo (WS_EX_TOPMOST). Widget
     // de escritorio: oculta de la barra de tareas (WS_EX_TOOLWINDOW) —
@@ -219,120 +191,44 @@ fn note_id(hwnd: HWND) -> u32 {
     unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as u32 }
 }
 
-fn app_font() -> HFONT {
-    let mut a = app().lock().unwrap();
-    if a.font == 0 {
-        let face = wide("Segoe UI");
-        let f = unsafe {
-            CreateFontW(
-                -16,
-                0,
-                0,
-                0,
-                FW_NORMAL as i32,
-                0,
-                0,
-                0,
-                DEFAULT_CHARSET as u32,
-                OUT_DEFAULT_PRECIS as u32,
-                CLIP_DEFAULT_PRECIS as u32,
-                CLEARTYPE_QUALITY as u32,
-                (DEFAULT_PITCH as u32) | (FF_DONTCARE as u32),
-                face.as_ptr(),
-            )
-        };
-        a.font = f as isize;
-    }
-    a.font as HFONT
+/// `v` píxeles a 100 %, al ppp de la nota.
+fn px(hwnd: HWND, v: i32) -> i32 {
+    let dpi = unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd) }.max(96) as i32;
+    v * dpi / 96
 }
 
-/// Fuente semibold para el título del encabezado (nota enrollada) —
-/// un poco más chica que la del cuerpo, para que lea como título.
-pub fn header_font() -> HFONT {
-    let mut a = app().lock().unwrap();
-    if a.header_font == 0 {
-        let face = wide("Segoe UI");
-        let f = unsafe {
-            CreateFontW(
-                -15,
-                0,
-                0,
-                0,
-                FW_SEMIBOLD as i32,
-                0,
-                0,
-                0,
-                DEFAULT_CHARSET as u32,
-                OUT_DEFAULT_PRECIS as u32,
-                CLIP_DEFAULT_PRECIS as u32,
-                CLEARTYPE_QUALITY as u32,
-                (DEFAULT_PITCH as u32) | (FF_DONTCARE as u32),
-                face.as_ptr(),
-            )
-        };
-        a.header_font = f as isize;
-    }
-    a.header_font as HFONT
+/// Alto del encabezado de esta nota (y de la nota entera, enrollada).
+fn header_h(hwnd: HWND) -> i32 {
+    px(hwnd, HEADER_H)
 }
 
-fn create_richedit(parent: HWND, hinstance: HINSTANCE, w: i32, content_h: i32, text: &str) -> HWND {
-    let class = wide("RICHEDIT50W");
-    let txt = wide(text);
-    unsafe {
-        CreateWindowExW(
-            0,
-            class.as_ptr(),
-            txt.as_ptr(),
-            WS_CHILD | WS_VISIBLE | WS_VSCROLL | (ES_MULTILINE as u32) | (ES_AUTOVSCROLL as u32) | (ES_WANTRETURN as u32),
-            0,
-            HEADER_H,
-            w,
-            content_h.max(0),
-            parent,
-            RICHEDIT_ID as HMENU,
-            hinstance,
-            null(),
-        )
-    }
+/// El tamaño de una nota nueva, al ppp del monitor en (`x`, `y`).
+pub fn default_size(x: i32, y: i32) -> (i32, i32) {
+    let dpi = flyout::dpi_at(x, y);
+    (flyout::px(dpi, 280), flyout::px(dpi, 320))
+}
+
+/// Fuente semibold del título (la del cuadro de renombrar, y la de
+/// respaldo si DirectWrite fallara).
+pub fn header_font(hwnd: HWND) -> HFONT {
+    flyout::font(-px(hwnd, 15), FW_SEMIBOLD as i32, 0, "Segoe UI")
 }
 
 fn apply_body_style(edit: HWND, color_idx: u8) {
     let (_, body, ink) = palette_entry(color_idx);
-    unsafe {
-        SendMessageW(edit, EM_SETBKGNDCOLOR, 0, body as isize);
-        SendMessageW(edit, WM_SETFONT, app_font() as usize, 1);
-    }
-    // El RichEdit no hereda el color de texto del tema del sistema: si
-    // no se fuerza acá, el texto puede quedar con muy poco contraste
-    // sobre el pastel del cuerpo. Se aplica a lo ya escrito (SCF_ALL) y
-    // a lo que se escriba de ahora en más (SCF_SELECTION, con el caret
-    // vacío equivale a fijar el formato por defecto).
-    let mut cf: CharFormat2W = unsafe { std::mem::zeroed() };
-    cf.cb_size = std::mem::size_of::<CharFormat2W>() as u32;
-    cf.dw_mask = CFM_COLOR;
-    cf.cr_text_color = ink;
-    unsafe {
-        SendMessageW(edit, EM_SETCHARFORMAT, SCF_ALL, &cf as *const CharFormat2W as isize);
-        SendMessageW(edit, EM_SETCHARFORMAT, SCF_SELECTION, &cf as *const CharFormat2W as isize);
-    }
+    editor::set_colors(edit, body, ink);
 }
 
 /// Deja aire entre el texto y el borde de la nota (el RichEdit por
 /// defecto arranca a escribir pegado al canto).
 fn apply_text_padding(edit: HWND, w: i32, content_h: i32) {
-    let mut rc = RECT {
-        left: TEXT_PAD_X,
-        top: TEXT_PAD_Y,
-        right: (w - TEXT_PAD_X).max(TEXT_PAD_X),
-        bottom: (content_h - TEXT_PAD_Y).max(TEXT_PAD_Y),
-    };
-    unsafe {
-        SendMessageW(edit, EM_SETRECT as u32, 0, &mut rc as *mut RECT as isize);
-    }
+    editor::set_padding(edit, w, content_h, px(edit, TEXT_PAD_X), px(edit, TEXT_PAD_Y));
 }
 
 pub fn first_line(text: &str) -> String {
     let line = text.lines().next().unwrap_or("").trim();
+    // La marca de una lista no es parte del título.
+    let line = line.trim_start_matches(['\u{2610}', '\u{2611}', '\u{2022}']).trim_start();
     if line.is_empty() {
         "Nota".to_string()
     } else {
@@ -362,12 +258,10 @@ pub fn rename_info(hwnd: HWND) -> Option<(String, u32, u32, RECT)> {
         (display_title(&nr.data), nr.data.color)
     };
     let (header, _, ink) = palette_entry(color);
-    let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-    unsafe { GetClientRect(hwnd, &mut rc) };
-    let t = HeaderLayout::new(rc.right).title_rect;
-    let h = 22;
-    let top = (HEADER_H - h) / 2;
-    Some((title, header, ink, RECT { left: t.left - 2, top, right: t.right, bottom: top + h }))
+    let t = layout_of(hwnd).title_rect;
+    let h = px(hwnd, 24);
+    let top = (header_h(hwnd) - h) / 2;
+    Some((title, header, ink, RECT { left: t.left - px(hwnd, 2), top, right: t.right, bottom: top + h }))
 }
 
 /// Pone el nombre elegido por el usuario (vacío = volver a usar la
@@ -386,146 +280,251 @@ pub fn set_title(hwnd: HWND, title: &str) {
 }
 
 // -----------------------------------------------------------------
-// Layout del encabezado
+// Encabezado: título y botones
 // -----------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Hit {
-    Chevron,
-    Ellipsis,
+    /// "+": una nota nueva al lado de esta.
+    Add,
+    /// Siempre encima / widget de escritorio.
     Pin,
-    /// El punto de color del encabezado: en el diseño no es un adorno,
-    /// es el selector de color (un clic abre la paleta de 6).
-    Dot,
-    /// El resto de la barra: qué hace depende de si está enrollada o
-    /// no, se decide en `on_lbuttondown` (ver comentario ahí).
+    /// Enrollar / desenrollar (solo en modo manual: en automático se
+    /// enrolla sola).
+    Chevron,
+    /// "⋯": colores y el resto de las opciones.
+    More,
+    /// El resto de la barra: arrastrar mueve la nota, doble clic la
+    /// renombra.
     Bar,
     None,
 }
 
+const BTN_W: i32 = 32;
+const BTN_H: i32 = 30;
+
 struct HeaderLayout {
-    dot: RECT,
+    /// Alto del encabezado, ya escalado.
+    height: i32,
+    add: RECT,
     pin: RECT,
-    chevron: RECT,
-    ellipsis: RECT,
+    chevron: Option<RECT>,
+    more: RECT,
     title_rect: RECT,
+    /// Los botones se ven solo con el mouse encima o mientras se escribe
+    /// en la nota; el resto del tiempo la barra es nada más el título
+    /// (un widget de escritorio no necesita cuatro íconos a la vista).
+    buttons: bool,
 }
 
 impl HeaderLayout {
-    fn new(width: i32) -> Self {
-        let cy = HEADER_H / 2;
-        let dot = RECT { left: 14, top: cy - 8, right: 30, bottom: cy + 8 };
-        let ellipsis = RECT { left: width - 46, top: 0, right: width - 14, bottom: HEADER_H };
-        let chevron = RECT { left: width - 82, top: 0, right: width - 50, bottom: HEADER_H };
-        let pin = RECT { left: width - 118, top: 0, right: width - 86, bottom: HEADER_H };
-        let title_rect = RECT { left: dot.right + 10, top: 0, right: (pin.left - 8).max(dot.right + 10), bottom: HEADER_H };
-        HeaderLayout { dot, pin, chevron, ellipsis, title_rect }
+    fn new(width: i32, buttons: bool, chevron: bool, dpi: i32) -> Self {
+        let p = |v| flyout::px(dpi, v);
+        let height = p(HEADER_H);
+        let (bw, bh, edge) = (p(BTN_W), p(BTN_H), p(6));
+        let top = (height - bh) / 2;
+        let slot = |i: i32| RECT { left: width - edge - bw * (i + 1), top, right: width - edge - bw * i, bottom: top + bh };
+        let more = slot(0);
+        let (chevron, pin, add) = if chevron { (Some(slot(1)), slot(2), slot(3)) } else { (None, slot(1), slot(2)) };
+        let right = if buttons { add.left - p(4) } else { width - p(14) };
+        let title_rect = RECT { left: p(14), top: 0, right: right.max(p(14)), bottom: height };
+        HeaderLayout { height, add, pin, chevron, more, title_rect, buttons }
     }
 
-    /// "⋯" y el pin son iguales enrollada o no. El chevron siempre
-    /// enrolla/desenrolla (el sentido que corresponda). El resto de
-    /// la barra (`Hit::Bar`) es ambiguo a propósito: `on_lbuttondown`
-    /// decide entre arrastrar y enrollar según el estado.
     fn hit(&self, x: i32, y: i32) -> Hit {
-        let inside = |r: &RECT| x >= r.left && x < r.right && y >= r.top && y < r.bottom;
-        // El punto es chico: se le da un área de clic algo más
-        // generosa que su dibujo, si no hay que apuntar con lupa.
-        let dot_zone = RECT { left: self.dot.left - 6, top: 0, right: self.dot.right + 6, bottom: HEADER_H };
-        if inside(&self.ellipsis) {
-            Hit::Ellipsis
-        } else if inside(&self.pin) {
-            Hit::Pin
-        } else if inside(&self.chevron) {
-            Hit::Chevron
-        } else if inside(&dot_zone) {
-            Hit::Dot
-        } else if y < HEADER_H {
-            Hit::Bar
-        } else {
-            Hit::None
+        if y < 0 || y >= self.height {
+            return Hit::None;
         }
+        let inside = |r: &RECT| x >= r.left && x < r.right && y >= r.top && y < r.bottom;
+        if self.buttons {
+            if inside(&self.more) {
+                return Hit::More;
+            }
+            if self.chevron.as_ref().is_some_and(inside) {
+                return Hit::Chevron;
+            }
+            if inside(&self.pin) {
+                return Hit::Pin;
+            }
+            if inside(&self.add) {
+                return Hit::Add;
+            }
+        }
+        Hit::Bar
+    }
+}
+
+/// Estado del encabezado de cada nota que no hace falta guardar: si el
+/// mouse está encima, qué botón está resaltado, y su ventana de ayudas.
+#[derive(Default)]
+struct HeaderState {
+    hover: bool,
+    hot: Option<Hit>,
+    tips: isize,
+}
+
+thread_local! {
+    static HEADERS: RefCell<HashMap<isize, HeaderState>> = RefCell::new(HashMap::new());
+}
+
+fn header_state<R>(hwnd: HWND, f: impl FnOnce(&mut HeaderState) -> R) -> R {
+    HEADERS.with(|m| f(m.borrow_mut().entry(hwnd as isize).or_default()))
+}
+
+fn has_focus(hwnd: HWND) -> bool {
+    let f = unsafe { GetFocus() };
+    !f.is_null() && (f == hwnd || unsafe { IsChild(hwnd, f) } != 0)
+}
+
+fn layout_of(hwnd: HWND) -> HeaderLayout {
+    let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    unsafe { GetClientRect(hwnd, &mut rc) };
+    let id = note_id(hwnd);
+    let auto = app().lock().unwrap().notes.get(&id).is_some_and(|nr| nr.data.roll_mode == RollMode::Auto);
+    let hover = header_state(hwnd, |s| s.hover);
+    let buttons = hover || has_focus(hwnd) || crate::rename::is_renaming(hwnd);
+    HeaderLayout::new(rc.right, buttons, !auto, px(hwnd, 96))
+}
+
+fn invalidate_header(hwnd: HWND) {
+    let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    unsafe {
+        GetClientRect(hwnd, &mut rc);
+        rc.bottom = header_h(hwnd);
+        InvalidateRect(hwnd, &rc, 0);
+    }
+}
+
+/// El mouse pasó por la nota (el encabezado, o su texto: ver
+/// `editor.rs`): aparecen los botones, hasta que se vaya.
+pub fn on_hover(hwnd: HWND) {
+    let newly = header_state(hwnd, |s| !std::mem::replace(&mut s.hover, true));
+    if newly {
+        unsafe { SetTimer(hwnd, TIMER_HOT, HOT_POLL_MS, None) };
+        invalidate_header(hwnd);
+    }
+}
+
+/// Entró o salió el foco del texto: con foco, los botones quedan a mano.
+pub fn on_focus_change(hwnd: HWND) {
+    if !hwnd.is_null() {
+        invalidate_header(hwnd);
+    }
+}
+
+fn set_hot_button(hwnd: HWND, hit: Hit) {
+    let hot = match hit {
+        Hit::Bar | Hit::None => None,
+        h => Some(h),
+    };
+    let changed = header_state(hwnd, |s| std::mem::replace(&mut s.hot, hot) != hot);
+    if changed {
+        invalidate_header(hwnd);
+    }
+}
+
+/// ¿Sigue el mouse sobre la nota? (Sin TrackMouseEvent: el mouse pasa
+/// del encabezado al texto, que es otra ventana, y eso contaría como
+/// "se fue".)
+fn hot_tick(hwnd: HWND) {
+    let mut pt = POINT { x: 0, y: 0 };
+    unsafe { GetCursorPos(&mut pt) };
+    let under = unsafe { WindowFromPoint(pt) };
+    let over = under == hwnd || unsafe { IsChild(hwnd, under) } != 0;
+    if over {
+        let mut c = pt;
+        unsafe { ScreenToClient(hwnd, &mut c) };
+        set_hot_button(hwnd, layout_of(hwnd).hit(c.x, c.y));
+        return;
+    }
+    if flyout::is_open() {
+        return; // con el menú de la nota abierto, los botones siguen
+    }
+    unsafe { KillTimer(hwnd, TIMER_HOT) };
+    header_state(hwnd, |s| {
+        s.hover = false;
+        s.hot = None;
+    });
+    invalidate_header(hwnd);
+}
+
+const TIPS: [(usize, &str); 4] = [
+    (1, "Nota nueva (Ctrl+N)"),
+    (2, "Siempre encima (Ctrl+Mayús+T)"),
+    (3, "Enrollar o desenrollar (Ctrl+R)"),
+    (4, "Color y más opciones"),
+];
+
+/// Las ayudas que aparecen al dejar el mouse sobre un botón.
+fn create_tooltips(hwnd: HWND) {
+    unsafe {
+        let hinstance = app().lock().unwrap().hinstance;
+        // Sin dueño: una nota anclada es hija del escritorio, y el dueño
+        // terminaría siendo una ventana de Explorer.
+        let tips = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            TOOLTIPS_CLASSW,
+            null(),
+            WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            null_mut(),
+            null_mut(),
+            hinstance as HINSTANCE,
+            null(),
+        );
+        if tips.is_null() {
+            return;
+        }
+        for (id, text) in TIPS {
+            let w = wide(text);
+            let mut ti: TTTOOLINFOW = std::mem::zeroed();
+            ti.cbSize = std::mem::size_of::<TTTOOLINFOW>() as u32;
+            ti.uFlags = TTF_SUBCLASS;
+            ti.hwnd = hwnd;
+            ti.uId = id;
+            ti.lpszText = w.as_ptr() as *mut u16;
+            SendMessageW(tips, TTM_ADDTOOLW, 0, &ti as *const TTTOOLINFOW as isize);
+        }
+        header_state(hwnd, |s| s.tips = tips as isize);
+    }
+}
+
+/// Las ayudas, sobre los botones que se ven en este momento.
+fn update_tooltips(hwnd: HWND, layout: &HeaderLayout) {
+    let tips = header_state(hwnd, |s| s.tips) as HWND;
+    if tips.is_null() {
+        return;
+    }
+    let none = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    let rects = [
+        (1, if layout.buttons { layout.add } else { none }),
+        (2, if layout.buttons { layout.pin } else { none }),
+        (3, if layout.buttons { layout.chevron.unwrap_or(none) } else { none }),
+        (4, if layout.buttons { layout.more } else { none }),
+    ];
+    for (id, rect) in rects {
+        let mut ti: TTTOOLINFOW = unsafe { std::mem::zeroed() };
+        ti.cbSize = std::mem::size_of::<TTTOOLINFOW>() as u32;
+        ti.hwnd = hwnd;
+        ti.uId = id;
+        ti.rect = rect;
+        unsafe { SendMessageW(tips, TTM_NEWTOOLRECTW, 0, &ti as *const TTTOOLINFOW as isize) };
+    }
+}
+
+fn forget_header_state(hwnd: HWND) {
+    let tips = HEADERS.with(|m| m.borrow_mut().remove(&(hwnd as isize)).map(|s| s.tips)).unwrap_or(0);
+    if tips != 0 {
+        unsafe { DestroyWindow(tips as HWND) };
     }
 }
 
 // -----------------------------------------------------------------
 // Dibujo
 // -----------------------------------------------------------------
-
-/// GDI clásico no suaviza líneas ni círculos (`Polyline`/`Ellipse` salen
-/// dentadas a este tamaño): por eso los íconos del encabezado se dibujan
-/// con GDI+ sobre el mismo HDC, con antialiasing y puntas/uniones
-/// redondeadas — el mismo `gdiplus.dll` que trae Windows desde XP, sin
-/// sumar ninguna dependencia ni un gramo de peso al binario.
-unsafe fn draw_header_icons(hdc: HDC, layout: &HeaderLayout, ink: u32, pinned: bool, rolled: bool) {
-    let mut graphics: *mut GpGraphics = null_mut();
-    if GdipCreateFromHDC(hdc, &mut graphics) != Ok || graphics.is_null() {
-        return;
-    }
-    GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias);
-
-    let ink_argb = colorref_to_argb(ink);
-    let mut pen: *mut GpPen = null_mut();
-    GdipCreatePen1(ink_argb, 1.8, UnitPixel, &mut pen);
-    GdipSetPenLineCap197819(pen, LineCapRound, LineCapRound, DashCapFlat);
-    GdipSetPenLineJoin(pen, LineJoinRound);
-
-    let mut brush: *mut GpSolidFill = null_mut();
-    GdipCreateSolidFill(ink_argb, &mut brush);
-    let brush = brush as *mut GpBrush;
-
-    // Punto de color: no un punto de tinta sólido, sino un tinte
-    // suave del propio color del encabezado, como una hendidura hacia
-    // adentro — un arco de sombra arriba y uno de brillo abajo, en vez
-    // de un relleno opaco de contraste fuerte.
-    let d = &layout.dot;
-    let (dw, dh) = (d.right - d.left, d.bottom - d.top);
-    let mut well_brush: *mut GpSolidFill = null_mut();
-    GdipCreateSolidFill(argb(0x2E, 0, 0, 0), &mut well_brush);
-    GdipFillEllipseI(graphics, well_brush as *mut GpBrush, d.left, d.top, dw, dh);
-    GdipDeleteBrush(well_brush as *mut GpBrush);
-
-    let mut shadow_pen: *mut GpPen = null_mut();
-    GdipCreatePen1(argb(0x55, 0, 0, 0), 1.3, UnitPixel, &mut shadow_pen);
-    GdipDrawArcI(graphics, shadow_pen, d.left, d.top, dw, dh, 180.0, 180.0);
-    GdipDeletePen(shadow_pen);
-
-    let mut highlight_pen: *mut GpPen = null_mut();
-    GdipCreatePen1(argb(0x60, 0xff, 0xff, 0xff), 1.3, UnitPixel, &mut highlight_pen);
-    GdipDrawArcI(graphics, highlight_pen, d.left, d.top, dw, dh, 0.0, 180.0);
-    GdipDeletePen(highlight_pen);
-
-    // Fijar (relleno si está siempre encima, contorno si no)
-    let pcx = (layout.pin.left + layout.pin.right) / 2;
-    let pcy = HEADER_H / 2 - 3;
-    let r = 6;
-    if pinned {
-        GdipFillEllipseI(graphics, brush, pcx - r, pcy - r, r * 2, r * 2);
-    } else {
-        GdipDrawEllipseI(graphics, pen, pcx - r, pcy - r, r * 2, r * 2);
-    }
-    GdipDrawLineI(graphics, pen, pcx, pcy + r, pcx, pcy + r + 7);
-
-    // Chevron: abajo si está expandida, hacia la derecha si está enrollada
-    let ccx = (layout.chevron.left + layout.chevron.right) / 2;
-    let ccy = HEADER_H / 2;
-    let chevron_pts = if rolled {
-        [Point { X: ccx - 4, Y: ccy - 6 }, Point { X: ccx + 4, Y: ccy }, Point { X: ccx - 4, Y: ccy + 6 }]
-    } else {
-        [Point { X: ccx - 6, Y: ccy - 4 }, Point { X: ccx, Y: ccy + 4 }, Point { X: ccx + 6, Y: ccy - 4 }]
-    };
-    GdipDrawLinesI(graphics, pen, chevron_pts.as_ptr(), 3);
-
-    // Ellipsis "⋯"
-    let ecx = (layout.ellipsis.left + layout.ellipsis.right) / 2;
-    let ecy = HEADER_H / 2;
-    for dx in [-8, 0, 8] {
-        GdipFillEllipseI(graphics, brush, ecx + dx - 3, ecy - 3, 6, 6);
-    }
-
-    GdipDeleteBrush(brush);
-    GdipDeletePen(pen);
-    GdipDeleteGraphics(graphics);
-}
 
 /// `COLORREF` (0x00BBGGRR, lo que usa GDI) → ARGB opaco (0xAARRGGBB,
 /// lo que espera GDI+).
@@ -536,10 +535,10 @@ pub fn colorref_to_argb(c: u32) -> u32 {
     0xff000000 | (r << 16) | (g << 8) | b
 }
 
-/// ARGB con alfa explícito, para los tintes semitransparentes del
-/// punto de color "hundido".
-fn argb(a: u8, r: u8, g: u8, b: u8) -> u32 {
-    ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+/// `a` sobre `b`, con `alpha` de 0 a 255 (colores GDI).
+fn blend(a: u32, b: u32, alpha: u32) -> u32 {
+    let mix = |sh: u32| (((a >> sh) & 0xff) * alpha + ((b >> sh) & 0xff) * (255 - alpha)) / 255;
+    mix(0) | (mix(8) << 8) | (mix(16) << 16)
 }
 
 fn on_paint(hwnd: HWND) {
@@ -566,37 +565,65 @@ fn paint(hwnd: HWND, hdc: HDC) {
     };
     let renaming = crate::rename::is_renaming(hwnd);
     let (header_color, _, ink) = palette_entry(color);
+    let layout = layout_of(hwnd);
+    let hot = header_state(hwnd, |s| s.hot);
+    update_tooltips(hwnd, &layout);
 
     unsafe {
         let mut client = RECT { left: 0, top: 0, right: 0, bottom: 0 };
         GetClientRect(hwnd, &mut client);
         let width = client.right - client.left;
-        let layout = HeaderLayout::new(width);
+        // En memoria y después de una: los botones aparecen y se
+        // resaltan con el mouse, y repintar directo parpadeaba.
+        let hh = layout.height;
+        let mem = CreateCompatibleDC(hdc);
+        let bmp = CreateCompatibleBitmap(hdc, width.max(1), hh);
+        let old_bmp = SelectObject(mem, bmp);
 
-        let header_rect = RECT { left: 0, top: 0, right: width, bottom: HEADER_H };
+        let header_rect = RECT { left: 0, top: 0, right: width, bottom: hh };
         let brush = CreateSolidBrush(header_color);
-        FillRect(hdc, &header_rect, brush);
+        FillRect(mem, &header_rect, brush);
         DeleteObject(brush);
+        SetBkMode(mem, TRANSPARENT as i32);
 
-        SetBkMode(hdc, TRANSPARENT as i32);
-        SetTextColor(hdc, ink);
+        if layout.buttons {
+            let mut g: *mut GpGraphics = null_mut();
+            GdipCreateFromHDC(mem, &mut g);
+            GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
+            let hover_bg = blend(ink, header_color, 0x24);
+            let mut buttons = vec![
+                (Hit::Add, layout.add, 0xE710u16),
+                (Hit::Pin, layout.pin, if pinned { 0xE842 } else { 0xE718 }),
+                (Hit::More, layout.more, 0xE712),
+            ];
+            if let Some(r) = layout.chevron {
+                buttons.push((Hit::Chevron, r, if rolled { 0xE70D } else { 0xE70E }));
+            }
+            for (hit, rect, glyph) in buttons {
+                if hot == Some(hit) {
+                    flyout::fill_round(g, &rect, px(hwnd, 5) as f32, hover_bg);
+                }
+                flyout::draw_glyph(mem, flyout::icon_font(-px(hwnd, 15)), glyph, &rect, ink);
+            }
+            GdipDeleteGraphics(g);
+        }
 
-        draw_header_icons(hdc, &layout, ink, pinned, rolled);
-
-        // El título (la primera línea) se ve siempre en el
-        // encabezado, esté enrollada o no — no solo cuando está
-        // enrollada.
-        //
-        // Sin este SelectObject, DrawTextW usa la fuente por defecto
-        // del DC (la bitmap "System" de toda la vida) en vez de Segoe
-        // UI — se nota mucho al lado del resto de la nota.
-        if !renaming {
-            let old_font = SelectObject(hdc, header_font());
+        // El título (el nombre, o la primera línea del texto) se ve
+        // siempre en el encabezado, esté enrollada o no.
+        if !renaming && !crate::d2d::draw_title(mem, layout.title_rect, &title, ink, header_color, px(hwnd, 15)) {
+            // Sin DirectWrite (no debería pasar): con GDI, emojis en gris.
+            let old_font = SelectObject(mem, header_font(hwnd));
+            SetTextColor(mem, ink);
             let mut text_rc = layout.title_rect;
             let wtext = wide(&title);
-            DrawTextW(hdc, wtext.as_ptr(), -1, &mut text_rc, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_LEFT);
-            SelectObject(hdc, old_font);
+            DrawTextW(mem, wtext.as_ptr(), -1, &mut text_rc, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_LEFT | DT_NOPREFIX);
+            SelectObject(mem, old_font);
         }
+
+        BitBlt(hdc, 0, 0, width, hh, mem, 0, 0, SRCCOPY);
+        SelectObject(mem, old_bmp);
+        DeleteObject(bmp);
+        DeleteDC(mem);
     }
 }
 
@@ -605,7 +632,7 @@ fn paint(hwnd: HWND, hdc: HDC) {
 // -----------------------------------------------------------------
 
 fn apply_rolled_state(hwnd: HWND, edit: HWND, w: i32, full_h: i32, rolled: bool) {
-    let new_h = if rolled { HEADER_H } else { full_h };
+    let new_h = if rolled { header_h(hwnd) } else { full_h };
     unsafe {
         SetWindowPos(hwnd, null_mut(), 0, 0, w, new_h, SWP_NOMOVE | SWP_NOZORDER);
         if !edit.is_null() {
@@ -692,10 +719,11 @@ fn set_roll_mode(hwnd: HWND, mode: RollMode) {
 // Menú "⋯" de la nota
 // -----------------------------------------------------------------
 
-/// Marca un ítem de menú con la viñeta redonda de "opción elegida" en
-/// vez del tilde de "activado". `MF_CHECKED` solo sabe dibujar el
-/// tilde; el círculo (que es lo que corresponde cuando las opciones
-/// son excluyentes, como en el diseño) se pide con `MFT_RADIOCHECK`.
+/// Marca un ítem de menú nativo con la viñeta redonda de "opción
+/// elegida" en vez del tilde de "activado" (lo usa el menú de la
+/// bandeja). `MF_CHECKED` solo sabe dibujar el tilde; el círculo (que es
+/// lo que corresponde cuando las opciones son excluyentes) se pide con
+/// `MFT_RADIOCHECK`.
 pub fn mark_radio(menu: HMENU, id: u32, selected: bool) {
     unsafe {
         let mut mii: MENUITEMINFOW = std::mem::zeroed();
@@ -707,48 +735,12 @@ pub fn mark_radio(menu: HMENU, id: u32, selected: bool) {
     }
 }
 
-/// Paleta de 6 colores como submenú (o como menú suelto, cuando se
-/// abre desde el punto de color del encabezado).
-unsafe fn build_color_menu(current: u8) -> (HMENU, Vec<Vec<u16>>) {
-    let menu = CreatePopupMenu();
-    let mut labels = Vec::with_capacity(crate::theme::PALETTE_LEN);
-    for (i, name) in crate::theme::COLOR_NAMES.iter().enumerate() {
-        labels.push(wide(name));
-        AppendMenuW(menu, MF_STRING, (ID_COLOR_BASE as usize) + i, labels[i].as_ptr());
-        mark_radio(menu, ID_COLOR_BASE + i as u32, current as usize == i);
-    }
-    (menu, labels)
-}
-
-/// Clic en el punto de color del encabezado: abre la paleta justo
-/// debajo, como en el diseño ("Selector de color — clic para elegir
-/// entre 6 colores").
-fn show_color_menu(hwnd: HWND) {
-    let id = note_id(hwnd);
-    let color = {
-        let a = app().lock().unwrap();
-        match a.notes.get(&id) {
-            Some(nr) => nr.data.color,
-            None => return,
-        }
-    };
-    unsafe {
-        let (menu, _labels) = build_color_menu(color);
-        let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-        GetClientRect(hwnd, &mut rc);
-        let layout = HeaderLayout::new(rc.right);
-        let mut pt = POINT { x: layout.dot.left, y: HEADER_H };
-        ClientToScreen(hwnd, &mut pt);
-        SetForegroundWindow(hwnd);
-        TrackPopupMenu(menu, TPM_LEFTBUTTON | TPM_LEFTALIGN, pt.x, pt.y, 0, hwnd, null());
-        PostMessageW(hwnd, WM_NULL, 0, 0);
-        DestroyMenu(menu);
-    }
-}
-
-/// El menú "⋯", con los mismos ítems que el diseño: color, enrollado,
-/// las dos capas como interruptores, duplicar y eliminar.
-fn show_note_menu(hwnd: HWND) {
+/// El menú de la nota — el botón "⋯" o el clic derecho en la barra —,
+/// el único lugar donde se elige el color (antes había dos: el punto del
+/// encabezado y un submenú con los nombres de los colores). `below`: el
+/// botón del que cuelga, en coordenadas de pantalla; `None`, en el
+/// cursor.
+fn show_note_menu(hwnd: HWND, below: Option<RECT>) {
     let id = note_id(hwnd);
     let (color, roll_mode, layer) = {
         let a = app().lock().unwrap();
@@ -757,69 +749,44 @@ fn show_note_menu(hwnd: HWND) {
             None => return,
         }
     };
+    let entries = vec![
+        Entry::Swatches { base: ID_COLOR_BASE, current: color },
+        Entry::Separator,
+        Entry::toggle(ID_TOGGLE_TOP, 0xE718, "Siempre encima", "Ctrl+Mayús+T", layer == Layer::AlwaysOnTop),
+        Entry::toggle(ID_TOGGLE_AUTOROLL, 0xE70E, "Enrollar al quitar el mouse", "", roll_mode == RollMode::Auto),
+        Entry::item(ID_RENAME, 0xE8AC, "Cambiar nombre", "F2"),
+        Entry::item(ID_DUPLICATE_NOTE, 0xE8C8, "Duplicar", ""),
+        Entry::item(ID_ALL_NOTES, 0xE70B, "Todas las notas", ""),
+        Entry::Separator,
+        Entry::item(ID_DELETE_NOTE, 0xE74D, "Eliminar nota", "").danger(),
+    ];
+    let anchor = match below {
+        Some(r) => flyout::Anchor::Below(r),
+        None => {
+            let mut pt = POINT { x: 0, y: 0 };
+            unsafe { GetCursorPos(&mut pt) };
+            flyout::Anchor::Point(pt.x, pt.y)
+        }
+    };
+    flyout::show(hwnd, entries, anchor);
+}
 
+/// "+" del encabezado: una nota nueva al lado de esta (a la derecha, o a
+/// la izquierda si no entra).
+fn new_note_beside(hwnd: HWND) {
+    let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    unsafe { GetWindowRect(hwnd, &mut rc) };
+    let (w, _) = default_size(rc.left, rc.top);
+    let mut x = rc.right + 12;
     unsafe {
-        let menu = CreatePopupMenu();
-        let (color_menu, _color_labels) = build_color_menu(color);
-        let color_label = wide("Color");
-        AppendMenuW(menu, MF_POPUP, color_menu as usize, color_label.as_ptr());
-
-        let roll_menu = CreatePopupMenu();
-        let manual_label = wide("Manual");
-        let auto_label = wide("Auto");
-        AppendMenuW(roll_menu, MF_STRING, ID_ROLL_MANUAL as usize, manual_label.as_ptr());
-        AppendMenuW(roll_menu, MF_STRING, ID_ROLL_AUTO as usize, auto_label.as_ptr());
-        mark_radio(roll_menu, ID_ROLL_MANUAL, roll_mode == RollMode::Manual);
-        mark_radio(roll_menu, ID_ROLL_AUTO, roll_mode == RollMode::Auto);
-        let roll_label = wide("Enrollar");
-        AppendMenuW(menu, MF_POPUP, roll_menu as usize, roll_label.as_ptr());
-
-        AppendMenuW(menu, MF_SEPARATOR, 0, null());
-
-        // Las dos capas, como los dos interruptores del diseño. Son
-        // excluyentes: "Normal" y "Desktop" son la misma cosa por
-        // dentro (ver `persist::Layer`), así que la nota siempre está
-        // en una de estas dos.
-        let top_label = wide("Siempre encima");
-        let widget_label = wide("Anclar al escritorio");
-        AppendMenuW(
-            menu,
-            MF_STRING | if layer == Layer::AlwaysOnTop { MF_CHECKED } else { MF_UNCHECKED },
-            ID_LAYER_ALWAYS_ON_TOP as usize,
-            top_label.as_ptr(),
-        );
-        AppendMenuW(
-            menu,
-            MF_STRING | if layer != Layer::AlwaysOnTop { MF_CHECKED } else { MF_UNCHECKED },
-            ID_LAYER_DESKTOP as usize,
-            widget_label.as_ptr(),
-        );
-
-        AppendMenuW(menu, MF_SEPARATOR, 0, null());
-
-        let rename_label = wide("Cambiar nombre\tF2");
-        AppendMenuW(menu, MF_STRING, ID_RENAME as usize, rename_label.as_ptr());
-        let dark_label = wide("Modo oscuro");
-        AppendMenuW(
-            menu,
-            MF_STRING | if crate::theme::is_dark() { MF_CHECKED } else { MF_UNCHECKED },
-            ID_DARK_MODE as usize,
-            dark_label.as_ptr(),
-        );
-        AppendMenuW(menu, MF_SEPARATOR, 0, null());
-
-        let duplicate_label = wide("Duplicar nota");
-        AppendMenuW(menu, MF_STRING, ID_DUPLICATE_NOTE as usize, duplicate_label.as_ptr());
-        let delete_label = wide("Eliminar nota");
-        AppendMenuW(menu, MF_STRING, ID_DELETE_NOTE as usize, delete_label.as_ptr());
-
-        let mut pt = POINT { x: 0, y: 0 };
-        GetCursorPos(&mut pt);
-        SetForegroundWindow(hwnd);
-        TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_LEFTALIGN, pt.x, pt.y, 0, hwnd, null());
-        PostMessageW(hwnd, WM_NULL, 0, 0);
-        DestroyMenu(menu);
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut info: MONITORINFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(monitor, &mut info) != 0 && x + w > info.rcWork.right {
+            x = rc.left - 12 - w;
+        }
     }
+    crate::tray::spawn_note_at(x, rc.top);
 }
 
 /// Copia la nota (texto, color, modo y tamaño) en una nota nueva,
@@ -942,12 +909,11 @@ pub fn apply_remote(new: NoteData) {
         return; // sin ventana ahora: se va a crear con los datos nuevos
     }
     unsafe {
-        if !edit.is_null() && old.text != new.text {
-            let text = wide(&new.text);
-            SendMessageW(edit, WM_SETTEXT, 0, text.as_ptr() as isize);
-        }
-        if !edit.is_null() && (old.text != new.text || old.color != new.color) {
+        if !edit.is_null() && old.color != new.color {
             apply_body_style(edit, new.color);
+        }
+        if !edit.is_null() && (old.text != new.text || old.fmt != new.fmt) {
+            editor::load(edit, &new.text, &new.fmt);
         }
         let (was_top, to_top) = (old.layer == Layer::AlwaysOnTop, new.layer == Layer::AlwaysOnTop);
         if was_top != to_top {
@@ -968,7 +934,7 @@ pub fn apply_remote(new: NoteData) {
             }
         }
         if (old.x, old.y) != (new.x, new.y) {
-            let (x, y) = clamp_to_work_area(new.x, new.y, new.w, HEADER_H);
+            let (x, y) = clamp_to_work_area(new.x, new.y, new.w, header_h(hwnd));
             crate::desktop::move_to_screen(hwnd, x, y);
         }
         if (old.w, old.h, old.rolled) != (new.w, new.h, new.rolled) {
@@ -1153,7 +1119,7 @@ pub fn drop_on_desktop(hwnd: HWND, x: i32, y: i32) {
     // Se mira un punto del encabezado ya ubicado: si el escritorio se
     // ve ahí, la ventana que aparece en ese punto es la propia nota
     // (hija del escritorio); si no, es lo que la tapa.
-    if !crate::desktop::is_desktop_visible_at(x + 24, y + HEADER_H / 2) {
+    if !crate::desktop::is_desktop_visible_at(x + px(hwnd, 24), y + header_h(hwnd) / 2) {
         open_note(hwnd);
     }
 }
@@ -1169,7 +1135,7 @@ fn place_on_desktop(hwnd: HWND, x: i32, y: i32) -> Option<(i32, i32)> {
     };
     // Que no quede fuera de la pantalla: al menos el encabezado entero
     // tiene que caer dentro del área de trabajo del monitor.
-    let (x, y) = clamp_to_work_area(x, y, w, HEADER_H);
+    let (x, y) = clamp_to_work_area(x, y, w, header_h(hwnd));
     if was_top {
         set_layer(hwnd, Layer::Desktop);
     } else {
@@ -1224,6 +1190,7 @@ pub fn apply_theme_all() {
         }
         unsafe { InvalidateRect(hwnd, null(), 1) };
     }
+    flyout::close();
 }
 
 /// Recrea las ventanas de las notas que se quedaron sin ventana (ver
@@ -1239,15 +1206,13 @@ pub fn recreate_lost() {
     }
 }
 
-/// El texto del RichEdit, con los saltos de línea siempre como `\n`:
-/// RichEdit los devuelve como `\r\n` (o `\r`), y si el mismo texto
-/// pudiera quedar guardado de dos formas, cada compu lo vería como un
-/// cambio y se lo pasarían de una a otra para siempre.
-fn read_text(edit: HWND) -> String {
-    let len = unsafe { SendMessageW(edit, WM_GETTEXTLENGTH, 0, 0) } as usize;
-    let mut buf: Vec<u16> = vec![0u16; len + 1];
-    unsafe { SendMessageW(edit, WM_GETTEXT, buf.len(), buf.as_mut_ptr() as isize) };
-    from_wide(&buf).replace("\r\n", "\n").replace('\r', "\n")
+/// El contenido del RichEdit: texto (con los saltos de línea siempre
+/// como `\n`: si el mismo texto pudiera quedar guardado de dos formas,
+/// cada compu lo vería como un cambio y se lo pasarían de una a otra
+/// para siempre) y formato.
+fn read_text(edit: HWND) -> (String, String) {
+    editor::refresh(edit);
+    editor::read(edit)
 }
 
 /// Pasa a los datos lo que haya en los cuadros de texto que el
@@ -1259,14 +1224,15 @@ pub fn commit_all_text() {
         let a = app().lock().unwrap();
         a.notes.values().filter(|nr| nr.edit != 0).map(|nr| (nr.data.id, nr.edit as HWND)).collect()
     };
-    let texts: Vec<(u32, String)> = edits.into_iter().map(|(id, edit)| (id, read_text(edit))).collect();
+    let texts: Vec<(u32, (String, String))> = edits.into_iter().map(|(id, edit)| (id, read_text(edit))).collect();
     let changed = {
         let mut a = app().lock().unwrap();
         let mut changed = false;
-        for (id, text) in texts {
+        for (id, (text, fmt)) in texts {
             if let Some(nr) = a.notes.get_mut(&id) {
-                if nr.data.text != text {
+                if nr.data.text != text || nr.data.fmt != fmt {
                     nr.data.text = text;
+                    nr.data.fmt = fmt;
                     changed = true;
                 }
             }
@@ -1290,11 +1256,12 @@ fn commit_text_and_save(hwnd: HWND) {
     if edit.is_null() {
         return;
     }
-    let text = read_text(edit);
+    let (text, fmt) = read_text(edit);
     {
         let mut a = app().lock().unwrap();
         if let Some(nr) = a.notes.get_mut(&id) {
             nr.data.text = text;
+            nr.data.fmt = fmt;
         }
     }
     save_all();
@@ -1306,24 +1273,28 @@ fn commit_text_and_save(hwnd: HWND) {
 
 fn on_create(hwnd: HWND) {
     let id = note_id(hwnd);
-    let (hinstance, color, w, content_h, rolled, text, roll_mode, layer) = {
+    let (hinstance, color, w, content_h, rolled, text, fmt, roll_mode, layer) = {
         let a = app().lock().unwrap();
         let nr = a.notes.get(&id).expect("nota registrada antes de crear la ventana");
         (
             a.hinstance,
             nr.data.color,
             nr.data.w,
-            nr.data.h - HEADER_H,
+            nr.data.h - header_h(hwnd),
             nr.data.rolled,
             nr.data.text.clone(),
+            nr.data.fmt.clone(),
             nr.data.roll_mode,
             nr.data.layer,
         )
     };
-    let edit = create_richedit(hwnd, hinstance as HINSTANCE, w, content_h, &text);
+    let hh = header_h(hwnd);
+    let edit = editor::create(hwnd, hinstance as HINSTANCE, RICHEDIT_ID, RECT { left: 0, top: hh, right: w, bottom: hh + content_h });
     apply_body_style(edit, color);
+    editor::load(edit, &text, &fmt);
     crate::theme::apply_scrollbars(edit);
     apply_text_padding(edit, w, content_h);
+    create_tooltips(hwnd);
     if rolled && !edit.is_null() {
         unsafe { ShowWindow(edit, SW_HIDE) };
     }
@@ -1361,15 +1332,16 @@ fn on_size(hwnd: HWND, lparam: LPARAM) {
     }
     let w = (lparam & 0xffff) as i32;
     let total_h = ((lparam >> 16) & 0xffff) as i32;
-    let eh = (total_h - HEADER_H).max(0);
-    unsafe { SetWindowPos(edit, null_mut(), 0, HEADER_H, w, eh, SWP_NOZORDER) };
+    let hh = header_h(hwnd);
+    let eh = (total_h - hh).max(0);
+    unsafe { SetWindowPos(edit, null_mut(), 0, hh, w, eh, SWP_NOZORDER) };
     apply_text_padding(edit, w, eh);
 }
 
 /// Fin de un arrastre o de un resize (WM_EXITSIZEMOVE cubre ambos).
 /// El alto solo se guarda si no está enrollada: `data.h` siempre
 /// representa el alto "desenrollado", y mientras está enrollada la
-/// ventana mide `HEADER_H` de verdad, que no es lo que hay que
+/// ventana mide el alto del encabezado, que no es lo que hay que
 /// recordar.
 fn on_move_end(hwnd: HWND) {
     let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
@@ -1380,9 +1352,9 @@ fn on_move_end(hwnd: HWND) {
         if let Some(nr) = a.notes.get_mut(&id) {
             nr.data.x = rc.left;
             nr.data.y = rc.top;
-            nr.data.w = (rc.right - rc.left).max(160);
+            nr.data.w = (rc.right - rc.left).max(px(hwnd, 160));
             if !nr.data.rolled {
-                nr.data.h = (rc.bottom - rc.top).max(HEADER_H + 80);
+                nr.data.h = (rc.bottom - rc.top).max(header_h(hwnd) + px(hwnd, 80));
             }
         }
     }
@@ -1396,9 +1368,10 @@ fn on_destroy(hwnd: HWND) {
         KillTimer(hwnd, TIMER_AUTOSAVE);
         KillTimer(hwnd, TIMER_DESKTOP_WATCH);
         KillTimer(hwnd, TIMER_PEEK_END);
-        KillTimer(hwnd, TIMER_BAR_CLICK);
+        KillTimer(hwnd, TIMER_HOT);
     }
     crate::rename::abort_for(hwnd);
+    forget_header_state(hwnd);
 
     let (deleting, edit) = {
         let a = app().lock().unwrap();
@@ -1429,8 +1402,9 @@ fn on_destroy(hwnd: HWND) {
     {
         let mut a = app().lock().unwrap();
         if let Some(nr) = a.notes.get_mut(&id) {
-            if let Some(t) = text {
+            if let Some((t, f)) = text {
                 nr.data.text = t;
+                nr.data.fmt = f;
             }
             nr.hwnd = 0;
             nr.edit = 0;
@@ -1447,13 +1421,9 @@ fn on_destroy(hwnd: HWND) {
 /// (ver `rename.rs`). El primer clic del par no llegó a enrollarla:
 /// se cancela acá (ver TIMER_BAR_CLICK).
 fn on_dblclick(hwnd: HWND, lparam: LPARAM) {
-    unsafe { KillTimer(hwnd, TIMER_BAR_CLICK) };
     let x = (lparam & 0xffff) as i16 as i32;
     let y = ((lparam >> 16) & 0xffff) as i16 as i32;
-    let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-    unsafe { GetClientRect(hwnd, &mut rc) };
-    let layout = HeaderLayout::new(rc.right);
-    if layout.hit(x, y) == Hit::Bar {
+    if layout_of(hwnd).hit(x, y) == Hit::Bar {
         crate::rename::begin(hwnd);
     }
 }
@@ -1477,10 +1447,11 @@ fn on_nchittest(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     let y = ((lparam >> 16) & 0xffff) as i16 as i32;
     let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
     unsafe { GetWindowRect(hwnd, &mut rc) };
-    let left = x < rc.left + RESIZE_MARGIN;
-    let right = x >= rc.right - RESIZE_MARGIN;
-    let top = y < rc.top + RESIZE_MARGIN;
-    let bottom = y >= rc.bottom - RESIZE_MARGIN;
+    let m = px(hwnd, RESIZE_MARGIN);
+    let left = x < rc.left + m;
+    let right = x >= rc.right - m;
+    let top = y < rc.top + m;
+    let bottom = y >= rc.bottom - m;
     let hit = if top && left {
         HTTOPLEFT
     } else if top && right {
@@ -1509,23 +1480,28 @@ fn on_nchittest(hwnd: HWND, lparam: LPARAM) -> LRESULT {
 
 /// Tamaño mínimo al redimensionar: que siempre quede lugar para el
 /// encabezado completo y algo de cuerpo debajo.
-fn on_getminmaxinfo(lparam: LPARAM) {
+fn on_getminmaxinfo(hwnd: HWND, lparam: LPARAM) {
     let info = unsafe { &mut *(lparam as *mut MINMAXINFO) };
-    info.ptMinTrackSize.x = 160;
-    info.ptMinTrackSize.y = HEADER_H + 80;
+    info.ptMinTrackSize.x = px(hwnd, 160);
+    info.ptMinTrackSize.y = header_h(hwnd) + px(hwnd, 80);
 }
 
 fn on_lbuttondown(hwnd: HWND, lparam: LPARAM) {
     let x = (lparam & 0xffff) as i16 as i32;
     let y = ((lparam >> 16) & 0xffff) as i16 as i32;
-    let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-    unsafe { GetClientRect(hwnd, &mut rc) };
-    let layout = HeaderLayout::new(rc.right);
+    let layout = layout_of(hwnd);
     match layout.hit(x, y) {
+        Hit::Add => new_note_beside(hwnd),
         Hit::Chevron => toggle_roll_manual(hwnd),
-        Hit::Ellipsis => show_note_menu(hwnd),
+        Hit::More => {
+            let mut r = layout.more;
+            unsafe {
+                ClientToScreen(hwnd, &mut r as *mut RECT as *mut POINT);
+                ClientToScreen(hwnd, (&mut r as *mut RECT as *mut POINT).add(1));
+            }
+            show_note_menu(hwnd, Some(r));
+        }
         Hit::Pin => toggle_always_on_top(hwnd),
-        Hit::Dot => show_color_menu(hwnd),
         Hit::Bar => on_bar_click(hwnd, x, y),
         Hit::None => {}
     }
@@ -1584,7 +1560,16 @@ pub fn handle_shortcut(target: HWND, vk: u32, repeat: bool) -> bool {
         Roll,
         AlwaysOnTop,
         Desktop,
+        Style(usize),
+        Bullets,
+        Todos,
+        /// Atajos propios del RichEdit que cambian cosas que la nota no
+        /// guarda (alineación, interlineado, tamaño de letra…): se
+        /// tragan, así lo que se ve es siempre lo que queda guardado.
+        Swallow,
     }
+    let alt = down(VK_MENU);
+    let in_text = !note.is_null() && is_body(note, target);
     let action = if note.is_null() {
         // Fuera de una nota, solo Ctrl+N en "Todas las notas".
         (ctrl && !shift && vk == b'N' as u32 && crate::allnotes::owns(target)).then_some(Action::NewNote)
@@ -1598,6 +1583,16 @@ pub fn handle_shortcut(target: HWND, vk: u32, repeat: bool) -> bool {
             (b'R', false) => Some(Action::Roll),
             (b'T', true) => Some(Action::AlwaysOnTop),
             (b'D', true) => Some(Action::Desktop),
+            _ if !in_text || alt => None,
+            (b'B', false) => Some(Action::Style(crate::richtext::BOLD)),
+            (b'I', false) => Some(Action::Style(crate::richtext::ITALIC)),
+            (b'U', false) => Some(Action::Style(crate::richtext::UNDERLINE)),
+            // Como en las Sticky Notes de Microsoft.
+            (b'T', false) => Some(Action::Style(crate::richtext::STRIKE)),
+            (b'L', true) => Some(Action::Bullets),
+            (b'C', true) => Some(Action::Todos),
+            (b'E' | b'J' | b'L' | b'1' | b'2' | b'5', _) => Some(Action::Swallow),
+            _ if [VK_OEM_PLUS, VK_OEM_PERIOD, VK_OEM_COMMA].contains(&(vk as u16)) => Some(Action::Swallow),
             _ => None,
         }
     };
@@ -1614,8 +1609,19 @@ pub fn handle_shortcut(target: HWND, vk: u32, repeat: bool) -> bool {
         Action::Roll => toggle_roll_manual(note),
         Action::AlwaysOnTop => toggle_always_on_top(note),
         Action::Desktop => set_layer(note, Layer::Desktop),
+        Action::Style(k) => editor::toggle_style(target, k),
+        Action::Bullets => editor::toggle_bullets(target),
+        Action::Todos => editor::toggle_todos(target),
+        Action::Swallow => {}
     }
     true
+}
+
+/// `true` si `target` es el cuadro de texto de la nota `note` (y no, por
+/// ejemplo, el de renombrar).
+fn is_body(note: HWND, target: HWND) -> bool {
+    let id = note_id(note);
+    app().lock().unwrap().notes.get(&id).is_some_and(|nr| nr.edit == target as isize)
 }
 
 /// El pin del encabezado: mismo efecto que "Capa → Siempre encima"
@@ -1630,57 +1636,63 @@ fn toggle_always_on_top(hwnd: HWND) {
     set_layer(hwnd, next);
 }
 
-/// El resto de la barra, sin la ambigüedad resuelta todavía:
-/// - **Enrollada**: arrastra, como cualquier título de ventana.
-/// - **Expandida**: un clic SIN arrastre la enrolla; si el usuario
-///   sí mueve el mouse, se convierte en un arrastre normal.
-///   `DragDetect` es el mecanismo estándar de Windows para distinguir
-///   ambos casos a partir del mismo botón apretado.
+/// El resto de la barra: arrastrar mueve la nota (un clic suelto no
+/// hace nada — antes la enrollaba, y un clic para traerla al frente o
+/// el primero de un doble clic la enrollaban sin querer). Para enrollar
+/// está el botón, y Ctrl+R.
+///
+/// `DragDetect` distingue el clic del arrastre sin comerse el doble clic
+/// (que es para renombrar).
 fn on_bar_click(hwnd: HWND, x: i32, y: i32) {
-    let id = note_id(hwnd);
-    let rolled = {
-        let a = app().lock().unwrap();
-        a.notes.get(&id).map(|nr| nr.data.rolled).unwrap_or(false)
-    };
     unsafe {
-        if rolled {
-            ReleaseCapture();
-            SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION as usize, 0);
-            return;
-        }
         let mut pt = POINT { x, y };
         ClientToScreen(hwnd, &mut pt);
         if DragDetect(hwnd, pt) != 0 {
             ReleaseCapture();
             SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION as usize, 0);
         } else {
-            // Todavía no: puede ser el primer clic de un doble clic
-            // (renombrar). Ver TIMER_BAR_CLICK.
-            SetTimer(hwnd, TIMER_BAR_CLICK, GetDoubleClickTime(), None);
+            // Un clic en la barra de una nota en la que se estaba
+            // escribiendo: el foco vuelve al texto.
+            let id = note_id(hwnd);
+            let edit = app().lock().unwrap().notes.get(&id).map(|nr| nr.edit as HWND);
+            if let Some(edit) = edit.filter(|e| !e.is_null()) {
+                SetFocus(edit);
+            }
         }
     }
 }
 
-fn on_command(hwnd: HWND, wparam: WPARAM) {
+fn on_command(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     let low = (wparam & 0xffff) as u32;
     let high = ((wparam >> 16) & 0xffff) as u32;
     if high == 0 {
         match low {
-            ID_ROLL_MANUAL => set_roll_mode(hwnd, RollMode::Manual),
-            ID_ROLL_AUTO => set_roll_mode(hwnd, RollMode::Auto),
-            ID_LAYER_DESKTOP => set_layer(hwnd, Layer::Desktop),
-            ID_LAYER_ALWAYS_ON_TOP => set_layer(hwnd, Layer::AlwaysOnTop),
+            ID_TOGGLE_TOP => toggle_always_on_top(hwnd),
+            ID_TOGGLE_AUTOROLL => {
+                let id = note_id(hwnd);
+                let auto = app().lock().unwrap().notes.get(&id).is_some_and(|nr| nr.data.roll_mode == RollMode::Auto);
+                set_roll_mode(hwnd, if auto { RollMode::Manual } else { RollMode::Auto });
+                unsafe { InvalidateRect(hwnd, null(), 0) };
+            }
             ID_DELETE_NOTE => confirm_delete(hwnd),
             ID_DUPLICATE_NOTE => duplicate_note(hwnd),
             ID_RENAME => crate::rename::begin(hwnd),
-            ID_DARK_MODE => crate::theme::set_dark(!crate::theme::is_dark()),
+            ID_ALL_NOTES => crate::allnotes::show(),
             id if (ID_COLOR_BASE..ID_COLOR_BASE + crate::theme::PALETTE_LEN as u32).contains(&id) => {
                 set_color(hwnd, (id - ID_COLOR_BASE) as u8)
+            }
+            id if (editor::ID_FIRST..=editor::ID_LAST).contains(&id) => {
+                let id_note = note_id(hwnd);
+                let edit = app().lock().unwrap().notes.get(&id_note).map(|nr| nr.edit as HWND);
+                if let Some(edit) = edit.filter(|e| !e.is_null()) {
+                    editor::command(edit, id);
+                }
             }
             _ => {}
         }
     } else if low as usize == RICHEDIT_ID && high == EN_CHANGE {
         unsafe { SetTimer(hwnd, TIMER_AUTOSAVE, AUTOSAVE_DEBOUNCE_MS, None) };
+        editor::schedule_refresh(lparam as HWND);
     }
 }
 
@@ -1713,7 +1725,7 @@ fn on_timer(hwnd: HWND, wparam: WPARAM) {
             // "¿Eliminar?" de esta misma nota, por ejemplo) se sigue
             // asomando; si no, vuelve a su lugar en el escritorio.
             let fg = unsafe { GetForegroundWindow() };
-            let ours = fg == hwnd || unsafe { GetWindow(fg, GW_OWNER) } == hwnd || unsafe { IsChild(hwnd, fg) } != 0;
+            let ours = fg == hwnd || unsafe { GetWindow(fg, GW_OWNER) } == hwnd || unsafe { IsChild(hwnd, fg) } != 0 || flyout::is_open();
             if !ours {
                 anchor_widget(hwnd);
             }
@@ -1722,12 +1734,7 @@ fn on_timer(hwnd: HWND, wparam: WPARAM) {
             unsafe { KillTimer(hwnd, TIMER_AUTOSAVE) };
             commit_text_and_save(hwnd);
         }
-        TIMER_BAR_CLICK => {
-            // Pasó el tiempo de doble clic sin un segundo clic: era un
-            // clic simple en la barra, que enrolla.
-            unsafe { KillTimer(hwnd, TIMER_BAR_CLICK) };
-            toggle_roll_manual(hwnd);
-        }
+        TIMER_HOT => hot_tick(hwnd),
         _ => {}
     }
 }
@@ -1767,19 +1774,32 @@ pub unsafe extern "system" fn note_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM,
         }
         WM_NCHITTEST => on_nchittest(hwnd, lparam),
         WM_GETMINMAXINFO => {
-            on_getminmaxinfo(lparam);
+            on_getminmaxinfo(hwnd, lparam);
             0
         }
         WM_RBUTTONUP => {
-            show_note_menu(hwnd);
+            show_note_menu(hwnd, None);
+            0
+        }
+        WM_MOUSEMOVE => {
+            on_hover(hwnd);
+            let x = (lparam & 0xffff) as i16 as i32;
+            let y = ((lparam >> 16) & 0xffff) as i16 as i32;
+            set_hot_button(hwnd, layout_of(hwnd).hit(x, y));
             0
         }
         WM_COMMAND => {
-            on_command(hwnd, wparam);
+            on_command(hwnd, wparam, lparam);
             0
         }
         WM_TIMER => {
             on_timer(hwnd, wparam);
+            0
+        }
+        WM_DPICHANGED => {
+            let r = &*(lparam as *const RECT);
+            SetWindowPos(hwnd, null_mut(), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
+            InvalidateRect(hwnd, null(), 1);
             0
         }
         WM_EXITSIZEMOVE => {

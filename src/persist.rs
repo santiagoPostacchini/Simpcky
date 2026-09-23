@@ -99,6 +99,10 @@ pub struct NoteData {
     /// línea del texto (y si tampoco hay, "Nota").
     pub title: String,
     pub text: String,
+    /// Negrita, cursiva, subrayado y tachado del texto (ver
+    /// `richtext.rs`). Vacío en una nota sin formato — y entonces ni se
+    /// escribe en el archivo, que queda igual que antes de que existiera.
+    pub fmt: String,
     /// Última modificación de cada parte (ms desde 1970; ver `CONTENT`,
     /// `COLOR`, `GEOM`, `STATE`). 0 = nunca se guardó (nota recién
     /// creada: `app::save_all` le pone la hora).
@@ -124,6 +128,7 @@ impl NoteData {
             rolled: false,
             title: String::new(),
             text: String::new(),
+            fmt: String::new(),
             t: [0; PARTS],
         }
     }
@@ -136,7 +141,14 @@ impl NoteData {
         let top = self.layer == Layer::AlwaysOnTop;
         let rolled = self.roll_mode == RollMode::Manual && self.rolled;
         [
-            format!("{}\u{1}{}", self.title, self.text),
+            // El formato va pegado solo si hay: una nota sin formato da
+            // la misma parte que antes, y no parece "cambiada" al
+            // actualizar la app.
+            if self.fmt.is_empty() {
+                format!("{}\u{1}{}", self.title, self.text)
+            } else {
+                format!("{}\u{1}{}\u{1}{}", self.title, self.text, self.fmt)
+            },
             self.color.to_string(),
             format!("{},{},{},{}", self.x, self.y, self.w, self.h),
             format!("{top},{},{rolled}", self.roll_mode.as_u8()),
@@ -149,6 +161,7 @@ impl NoteData {
             CONTENT => {
                 self.title = other.title.clone();
                 self.text = other.text.clone();
+                self.fmt = other.fmt.clone();
             }
             COLOR => self.color = other.color,
             GEOM => {
@@ -238,8 +251,9 @@ pub fn save_notes(notes: &[NoteData]) {
 /// no (el documento que se sube a Drive).
 pub fn note_json(n: &NoteData, local: bool) -> String {
     let id = if local { format!("\"id\":{},", n.id) } else { String::new() };
+    let fmt = if n.fmt.is_empty() { String::new() } else { format!("\"fmt\":\"{}\",", json::escape(&n.fmt)) };
     format!(
-        "{{{id}\"uid\":\"{}\",\"x\":{},\"y\":{},\"w\":{},\"h\":{},\"color\":{},\"layer\":{},\"rollMode\":{},\"rolled\":{},\"title\":\"{}\",\"text\":\"{}\",\"t\":[{},{},{},{}]}}",
+        "{{{id}\"uid\":\"{}\",\"x\":{},\"y\":{},\"w\":{},\"h\":{},\"color\":{},\"layer\":{},\"rollMode\":{},\"rolled\":{},\"title\":\"{}\",\"text\":\"{}\",{fmt}\"t\":[{},{},{},{}]}}",
         json::escape(&n.uid),
         n.x,
         n.y,
@@ -279,6 +293,7 @@ pub fn note_from_json(j: &Json) -> Option<NoteData> {
         rolled: j.bool_or("rolled", false),
         title: j.str_or("title", ""),
         text: j.str_or("text", ""),
+        fmt: j.str_or("fmt", ""),
         t,
     })
 }
@@ -457,6 +472,21 @@ mod tests {
         let saved: Vec<String> = notes.iter().map(|n| note_json(n, true)).collect();
         let again = parse_notes(&format!("[{}]", saved.join(",")), 99);
         assert_eq!(again, notes);
+    }
+
+    #[test]
+    fn fmt_is_saved_only_when_present() {
+        let mut n = NoteData::new(1, 0, 0, 0, RollMode::Manual);
+        n.text = "hola".into();
+        let plain = note_json(&n, true);
+        assert!(!plain.contains("fmt"));
+        let before = n.parts();
+        n.fmt = "b0+4".into();
+        let rich = note_json(&n, true);
+        assert!(rich.contains("\"fmt\":\"b0+4\""));
+        assert_ne!(before[CONTENT], n.parts()[CONTENT]);
+        let back = note_from_json(&crate::json::parse(&rich).unwrap()).unwrap();
+        assert_eq!(back.fmt, "b0+4");
     }
 
     #[test]

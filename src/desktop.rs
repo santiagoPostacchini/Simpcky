@@ -1,18 +1,14 @@
-//! "Anclar al escritorio": reparenta una nota dentro de la ventana del
-//! escritorio (una `WorkerW`, o `Progman` mismo en Windows 11 24H2+),
+//! "Anclar al escritorio": reparenta una nota dentro de la ventana que
+//! contiene los íconos del escritorio (`Progman` en Windows 11 24H2+, o
+//! la `WorkerW` a la que Explorer los haya mudado), encima de ellos,
 //! para que quede fija ahí — se ve con "Mostrar escritorio", nunca tapa
 //! otras ventanas, y no aparece en Alt+Tab.
 //!
-//! Esto usa el mismo truco no documentado que Rainmeter, Wallpaper
-//! Engine, etc.: pedirle a `Progman` (la ventana del Administrador de
-//! programas) que genere una `WorkerW` con el mensaje `0x052C`, y
-//! quedarnos con la que aparece como hermana de la que contiene los
-//! íconos (`SHELLDLL_DefView`). No es una API pública de Windows, así
-//! que puede fallar (o dejar de funcionar tras un reinicio de
-//! `explorer.exe`) — por eso todo esto se degrada solo a "Normal" en
-//! vez de romper la nota, y [`anchor`] se reintenta solo cada tanto
-//! mientras la nota siga en modo escritorio (ver `TIMER_DESKTOP_WATCH`
-//! en `note.rs`).
+//! No es una API pública de Windows: puede fallar (o dejar de valer
+//! tras un reinicio de `explorer.exe`), así que [`anchor`] se reintenta
+//! solo cada tanto mientras la nota siga en modo escritorio (ver
+//! `TIMER_DESKTOP_WATCH` en `note.rs`) y, mientras tanto, la nota queda
+//! como ventana suelta en vez de perderse.
 
 use std::ptr::null_mut;
 
@@ -22,63 +18,43 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::win::wide;
 
-/// El mensaje que hace que `explorer.exe` genere/reutilice la
-/// `WorkerW` detrás de los íconos. Sin nombre oficial — así lo
-/// identifican todas las implementaciones públicas de este truco.
-const SPAWN_WORKER_MSG: u32 = 0x052C;
-
-/// Busca la `WorkerW` que queda detrás de los íconos del escritorio.
-/// Devuelve un HWND nulo si el truco no funcionó en esta versión/estado
-/// de `explorer.exe`.
-fn find_worker() -> HWND {
+/// La ventana que contiene los íconos del escritorio: el padre de
+/// `SHELLDLL_DefView`. Las notas van ahí, encima de los íconos. Nulo si
+/// Explorer no está (reiniciándose, por ejemplo).
+///
+/// Antes se buscaba "la WorkerW que viene después de la de los íconos"
+/// en el orden de apilado de las ventanas, con el mensaje no documentado
+/// `0x052C` de por medio (el truco de los fondos de pantalla animados).
+/// En Windows 11 24H2 los íconos viven directo en `Progman`, y hay una
+/// docena de `WorkerW` ocultas dando vueltas: cuando "Mostrar
+/// escritorio" subía a `Progman` en esa pila, la "siguiente WorkerW"
+/// pasaba a ser una oculta de 198×56, el vigilante mudaba las notas ahí
+/// y desaparecían hasta volver a ponerlas. El padre de los íconos no
+/// depende de ningún orden.
+fn find_host() -> HWND {
     unsafe {
+        let defview_class = wide("SHELLDLL_DefView");
         let progman_class = wide("Progman");
         let progman = FindWindowW(progman_class.as_ptr(), std::ptr::null());
-        if progman.is_null() {
-            return null_mut();
-        }
-
-        // Con esto alcanza para que aparezca la WorkerW; llamarlo de
-        // más no genera duplicados.
-        let mut result: usize = 0;
-        SendMessageTimeoutW(progman, SPAWN_WORKER_MSG, 0, 0, SMTO_NORMAL, 1000, &mut result);
-
-        let mut worker: HWND = null_mut();
-        EnumWindows(Some(enum_find_worker), &mut worker as *mut HWND as LPARAM);
-        if !worker.is_null() {
-            return worker;
-        }
-
-        // Algunas configuraciones (confirmado: esta sesión, con doce
-        // WorkerW sueltas sin íconos y SHELLDLL_DefView colgando
-        // directo de Progman) no migran los íconos a una WorkerW
-        // aparte ni siquiera después del mensaje — Progman se queda
-        // haciendo de contenedor. Ahí reparentar directo a Progman
-        // también deja la nota detrás de los íconos.
-        let defview_class = wide("SHELLDLL_DefView");
-        let has_defview = FindWindowExW(progman, null_mut(), defview_class.as_ptr(), std::ptr::null());
-        if !has_defview.is_null() {
+        if !progman.is_null() && !FindWindowExW(progman, null_mut(), defview_class.as_ptr(), std::ptr::null()).is_null() {
             return progman;
         }
-
-        null_mut()
+        // Explorer mudó los íconos a una WorkerW (pasa en Windows 10 y
+        // en Windows 11 anteriores a 24H2 si algún programa de fondos
+        // animados se lo pidió).
+        let mut host: HWND = null_mut();
+        EnumWindows(Some(enum_find_host), &mut host as *mut HWND as LPARAM);
+        host
     }
 }
 
-unsafe extern "system" fn enum_find_worker(hwnd: HWND, lparam: LPARAM) -> BOOL {
+unsafe extern "system" fn enum_find_host(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let defview_class = wide("SHELLDLL_DefView");
-    let has_defview = FindWindowExW(hwnd, null_mut(), defview_class.as_ptr(), std::ptr::null());
-    if !has_defview.is_null() {
-        // La WorkerW que nos sirve es la que aparece JUSTO DESPUÉS de
-        // esta (la que sostiene los íconos) en el orden de ventanas de
-        // nivel superior.
-        let worker_class = wide("WorkerW");
-        let sibling = FindWindowExW(null_mut(), hwnd, worker_class.as_ptr(), std::ptr::null());
-        if !sibling.is_null() {
-            *(lparam as *mut HWND) = sibling;
-        }
+    if !FindWindowExW(hwnd, null_mut(), defview_class.as_ptr(), std::ptr::null()).is_null() {
+        *(lparam as *mut HWND) = hwnd;
+        return 0; // hay uno solo
     }
-    1 // seguir enumerando: nos quedamos con la última coincidencia
+    1
 }
 
 /// `true` si `hwnd` ya es hijo del contenedor de íconos correcto en
@@ -86,19 +62,15 @@ unsafe extern "system" fn enum_find_worker(hwnd: HWND, lparam: LPARAM) -> BOOL {
 /// del control que se esté editando) cuando en realidad no hace
 /// falta.
 pub fn is_anchored(hwnd: HWND) -> bool {
-    let worker = find_worker();
-    if worker.is_null() {
-        return false;
-    }
-    unsafe { GetAncestor(hwnd, GA_PARENT) == worker }
+    let host = find_host();
+    !host.is_null() && unsafe { GetAncestor(hwnd, GA_PARENT) } == host && unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32 & WS_VISIBLE != 0
 }
 
-/// Reparenta `hwnd` detrás de los íconos del escritorio.
-/// `true` si se encontró una `WorkerW` (o, en algunas sesiones, el
-/// propio Progman — ver `find_worker`) y `SetParent` confirmó el
-/// cambio.
+/// Reparenta `hwnd` en el escritorio, encima de los íconos. `true` si
+/// se encontró el contenedor (ver `find_host`) y `SetParent` confirmó
+/// el cambio.
 pub fn anchor(hwnd: HWND) -> bool {
-    let worker = find_worker();
+    let worker = find_host();
     if worker.is_null() {
         return false;
     }
@@ -158,7 +130,7 @@ pub fn anchor(hwnd: HWND) -> bool {
             top_left.y,
             0,
             0,
-            SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW,
         );
     }
     true

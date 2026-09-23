@@ -5,8 +5,11 @@
 mod allnotes;
 mod app;
 mod crypto;
+mod d2d;
 mod desktop;
 mod drive;
+mod editor;
+mod flyout;
 mod ghost;
 mod http;
 mod icon;
@@ -14,6 +17,7 @@ mod json;
 mod note;
 mod oauth;
 mod persist;
+mod richtext;
 mod rename;
 mod shell;
 mod sync;
@@ -33,7 +37,7 @@ use windows_sys::Win32::System::Threading::{CreateMutexW, OpenProcess, Sleep, Wa
 use windows_sys::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW, GetWindowThreadProcessId,
-    PostMessageW, TranslateMessage, MSG, WM_KEYDOWN,
+    PostMessageW, TranslateMessage, MSG, WM_KEYDOWN, WM_SYSKEYDOWN,
 };
 
 use app::{init_app, save_all};
@@ -115,6 +119,7 @@ fn main() {
 
     note::load_richedit_library();
     note::register_class(hinstance);
+    flyout::register_class(hinstance);
     tray::register_class(hinstance);
     allnotes::register_class(hinstance);
     welcome::register_class(hinstance);
@@ -157,6 +162,11 @@ fn main() {
         // tecla mantenida apretada: sin mirarlo, dejar Ctrl+N apretado
         // medio segundo creaba una docena de notas.
         let repeat = (msg.lParam >> 30) & 1 != 0;
+        // Con el menú de una nota abierto, las flechas, Enter y Esc son
+        // del menú (que no tiene el foco: ver `flyout.rs`).
+        if (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN) && flyout::handle_key(msg.wParam as u32) {
+            continue;
+        }
         if msg.message == WM_KEYDOWN && note::handle_shortcut(msg.hwnd, msg.wParam as u32, repeat) {
             continue;
         }

@@ -250,6 +250,7 @@ pub fn spawn_note_at(x: i32, y: i32) {
     let roll_mode = crate::app::default_roll_mode();
     let color = ((id.saturating_sub(1)) % crate::theme::PALETTE_LEN as u32) as u8;
     let mut data = NoteData::new(id, x, y, color, roll_mode);
+    (data.w, data.h) = note::default_size(x, y);
     let (cx, cy) = note::clamp_to_work_area(x, y, data.w, data.h);
     data.x = cx;
     data.y = cy;

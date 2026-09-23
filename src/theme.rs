@@ -94,7 +94,6 @@ const DARK_PALETTE: [(u32, u32, u32); PALETTE_LEN] = [
     (rgb(0x3E, 0x46, 0x52), rgb(0x1E, 0x22, 0x27), rgb(0xE2, 0xE8, 0xF0)), // gris
 ];
 
-pub const COLOR_NAMES: [&str; PALETTE_LEN] = ["Amarillo", "Rosa", "Verde", "Azul", "Morado", "Gris"];
 
 /// (encabezado, cuerpo, tinta) de un color de nota, en el tema actual.
 pub fn note_colors(idx: u8) -> (u32, u32, u32) {
