@@ -4,6 +4,7 @@
 
 mod allnotes;
 mod app;
+mod backdrop;
 mod crypto;
 mod d2d;
 mod desktop;
@@ -100,6 +101,7 @@ fn main() {
         default_roll_mode: RollMode::Manual,
         desktop_menu: true,
         auto_update: true,
+        translucency: 2,
     });
     theme::init(settings.dark);
 
@@ -123,6 +125,12 @@ fn main() {
     tray::register_class(hinstance);
     allnotes::register_class(hinstance);
     welcome::register_class(hinstance);
+
+    // El fondo desenfocado de las notas translúcidas, antes de que haya
+    // notas que pintar (armarlo le pide el fondo de pantalla a Explorer).
+    if app::app().lock().unwrap().settings.translucency > 0 {
+        backdrop::warm();
+    }
 
     load_or_create_notes();
     // Lo que se acaba de cargar es el punto de partida para detectar

@@ -229,6 +229,10 @@ struct EditState {
     bar_hover: bool,
     /// Arrastrando la barra: a qué altura del pulgar se lo agarró.
     bar_drag: Option<i32>,
+    /// Fondo translúcido (opacidad del color de la nota), o liso.
+    backdrop: Option<u8>,
+    /// Dónde estaba desplazado el texto la última vez que se pintó.
+    last_scroll: (i32, i32),
 }
 
 /// Temporizador del RichEdit para acomodar la presentación un momento
@@ -255,7 +259,10 @@ pub fn create(parent: HWND, hinstance: HINSTANCE, id: usize, rc: RECT) -> HWND {
     let class = wide("RICHEDIT50W");
     unsafe {
         let edit = CreateWindowExW(
-            0,
+            // Transparente: el RichEdit pinta solo el texto, y el fondo lo
+            // pone `paint_background` (liso, o el translúcido de las notas
+            // del escritorio).
+            WS_EX_TRANSPARENT,
             class.as_ptr(),
             null(),
             WS_CHILD
@@ -306,6 +313,8 @@ pub fn create(parent: HWND, hinstance: HINSTANCE, id: usize, rc: RECT) -> HWND {
                     emojis: Vec::new(),
                     bar_hover: false,
                     bar_drag: None,
+                    backdrop: None,
+                    last_scroll: (0, 0),
                 })
         });
         SetWindowSubclass(edit, Some(subclass_proc), 1, 0);
@@ -1145,9 +1154,7 @@ unsafe fn paint_bar(edit: HWND) {
     let (strip, bar) = bar(edit);
     let (ink, body) = colors(edit);
     let hdc = GetDC(edit);
-    let brush = CreateSolidBrush(body);
-    FillRect(hdc, &strip, brush);
-    DeleteObject(brush);
+    fill_bg(edit, hdc, strip);
     if let Some(b) = bar {
         let (hover, drag) = with_state(edit, |s| (s.bar_hover, s.bar_drag.is_some())).unwrap_or((false, false));
         let wide = hover || drag;
@@ -1231,7 +1238,7 @@ unsafe fn paint_marks(edit: HWND) {
                 let cover = if pe.y == p0.y && pe.x > right { pe.x } else { right };
                 let bottom = line_bottom(edit, a, p0.y);
                 let glyph = RECT { left: p0.x, top: p0.y, right, bottom };
-                draw_checkbox(g, hdc, glyph, cover, em, done, ink, body);
+                draw_checkbox(edit, g, hdc, glyph, cover, em, done, ink, body);
             }
             GdipDeleteGraphics(g);
         }
@@ -1247,7 +1254,22 @@ unsafe fn paint_marks(edit: HWND) {
         let p1 = pos(edit, b);
         let right = if p1.y == p0.y && p1.x > p0.x { p1.x } else { p0.x + em * 5 / 4 };
         let cell = RECT { left: p0.x, top: p0.y, right, bottom: line_bottom(edit, a, p0.y) };
-        let bg = if selected_visible && a >= s && b <= e { GetSysColor(COLOR_HIGHLIGHT) } else { body };
+        let bg = if selected_visible && a >= s && b <= e {
+            Some(GetSysColor(COLOR_HIGHLIGHT))
+        } else if translucent(edit) {
+            // Primero se tapa el emoji en gris con el fondo; el de color va
+            // encima, sin fondo propio.
+            let r = RECT {
+                left: cell.left.max(clip.left),
+                top: cell.top.max(clip.top),
+                right: cell.right.min(clip.right),
+                bottom: cell.bottom.min(clip.bottom),
+            };
+            fill_bg(edit, hdc, r);
+            None
+        } else {
+            Some(body)
+        };
         crate::d2d::draw_emoji(hdc, cell, clip, &text[a..b], em as u32, bg);
     }
 
@@ -1276,10 +1298,9 @@ unsafe fn paint_placeholder(edit: HWND) {
 /// Una casilla redondeada en lugar del ☐/☑ de la fuente: contorno
 /// suave si está pendiente, llena y con tilde si está hecha. `cover`:
 /// hasta dónde tapar a la derecha (la marca y el espacio que la sigue).
-unsafe fn draw_checkbox(g: *mut GpGraphics, hdc: HDC, cell: RECT, cover: i32, em: i32, done: bool, ink: u32, body: u32) {
-    let brush = CreateSolidBrush(body);
-    FillRect(hdc, &RECT { right: cover, ..cell }, brush);
-    DeleteObject(brush);
+#[allow(clippy::too_many_arguments)]
+unsafe fn draw_checkbox(edit: HWND, g: *mut GpGraphics, hdc: HDC, cell: RECT, cover: i32, em: i32, done: bool, ink: u32, body: u32) {
+    fill_bg(edit, hdc, RECT { right: cover, ..cell });
     let size = (em * 7 / 8) as f32;
     let cx = (cell.left + cell.right) as f32 / 2.0;
     let cy = (cell.top + cell.bottom) as f32 / 2.0;
@@ -1330,10 +1351,12 @@ fn ctrl() -> bool {
 unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _id: usize, _data: usize) -> LRESULT {
     match msg {
         WM_PAINT => {
+            paint_background(edit);
             let r = DefSubclassProc(edit, msg, wparam, lparam);
             paint_overlay(edit);
             r
         }
+        WM_ERASEBKGND => 1,
         WM_KEYUP | WM_IME_CHAR | WM_IME_COMPOSITION | WM_UNDO | WM_CUT | WM_CLEAR => {
             let r = DefSubclassProc(edit, msg, wparam, lparam);
             paint_overlay(edit);
@@ -1525,6 +1548,59 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
         }
         _ => DefSubclassProc(edit, msg, wparam, lparam),
     }
+}
+
+/// Fondo translúcido para el texto (la opacidad del color de la nota
+/// sobre el fondo de pantalla), o `None` para liso.
+pub fn set_backdrop(edit: HWND, opacity: Option<u8>) {
+    with_state(edit, |s| s.backdrop = opacity);
+    unsafe { InvalidateRect(edit, null(), 0) };
+}
+
+/// El fondo del texto en `r` (coordenadas del RichEdit).
+unsafe fn fill_bg(edit: HWND, hdc: HDC, r: RECT) {
+    let (_, body) = colors(edit);
+    if let Some(alpha) = with_state(edit, |s| s.backdrop).flatten() {
+        let mut screen = r;
+        MapWindowPoints(edit, null_mut(), &mut screen as *mut RECT as *mut POINT, 2);
+        if crate::backdrop::paint(hdc, r, screen, body, alpha) {
+            return;
+        }
+    }
+    let brush = CreateSolidBrush(body);
+    FillRect(hdc, &r, brush);
+    DeleteObject(brush);
+}
+
+fn translucent(edit: HWND) -> bool {
+    with_state(edit, |s| s.backdrop.is_some()).unwrap_or(false)
+}
+
+/// Antes de que el RichEdit pinte (solo texto: es transparente), el fondo
+/// de lo que va a repintar.
+unsafe fn paint_background(edit: HWND) {
+    if translucent(edit) {
+        // Al desplazarse, el RichEdit corre la imagen de la ventana
+        // (ScrollWindow) y con ella el fondo, que no se mueve con el
+        // texto: si se desplazó desde la última vez, se repinta todo.
+        let mut p = POINT { x: 0, y: 0 };
+        send(edit, EM_GETSCROLLPOS, 0, &mut p as *mut POINT as isize);
+        let moved = with_state(edit, |s| std::mem::replace(&mut s.last_scroll, (p.x, p.y)) != (p.x, p.y)).unwrap_or(false);
+        if moved {
+            InvalidateRect(edit, null(), 0);
+        }
+    }
+    let rgn = CreateRectRgn(0, 0, 0, 0);
+    let kind = GetUpdateRgn(edit, rgn, 0);
+    if kind != NULLREGION && kind != RGN_ERROR {
+        let hdc = GetDC(edit);
+        SelectClipRgn(hdc, rgn);
+        let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        GetClientRect(edit, &mut rc);
+        fill_bg(edit, hdc, rc);
+        ReleaseDC(edit, hdc);
+    }
+    DeleteObject(rgn);
 }
 
 /// Márgenes internos del texto.

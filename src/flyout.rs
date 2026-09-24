@@ -465,6 +465,11 @@ pub unsafe fn draw_glyph(dc: HDC, f: HFONT, code: u16, rc: &RECT, color: u32) {
 }
 
 pub unsafe fn fill_round(g: *mut GpGraphics, r: &RECT, radius: f32, color: u32) {
+    fill_round_argb(g, r, radius, crate::note::colorref_to_argb(color));
+}
+
+/// Como `fill_round`, con el color en ARGB (puede ser semitransparente).
+pub unsafe fn fill_round_argb(g: *mut GpGraphics, r: &RECT, radius: f32, argb: u32) {
     let mut path: *mut GpPath = null_mut();
     GdipCreatePath(FillModeAlternate, &mut path);
     let (x, y, w, h) = (r.left as f32, r.top as f32, (r.right - r.left) as f32, (r.bottom - r.top) as f32);
@@ -475,7 +480,7 @@ pub unsafe fn fill_round(g: *mut GpGraphics, r: &RECT, radius: f32, color: u32) 
     GdipAddPathArc(path, x, y + h - d, d, d, 90.0, 90.0);
     GdipClosePathFigure(path);
     let mut brush: *mut GpSolidFill = null_mut();
-    GdipCreateSolidFill(crate::note::colorref_to_argb(color), &mut brush);
+    GdipCreateSolidFill(argb, &mut brush);
     GdipFillPath(g, brush as *mut GpBrush, path);
     GdipDeleteBrush(brush as *mut GpBrush);
     GdipDeletePath(path);

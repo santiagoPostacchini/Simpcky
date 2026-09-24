@@ -68,6 +68,20 @@ const D2D1_FACTORY_TYPE_SINGLE_THREADED: u32 = 0;
 const D2D1_RENDER_TARGET_TYPE_SOFTWARE: u32 = 1; // áreas chiquitas: más rápido que ir y volver de la GPU
 const DXGI_FORMAT_B8G8R8A8_UNORM: u32 = 87;
 const D2D1_ALPHA_MODE_IGNORE: u32 = 3;
+const D2D1_BITMAP_INTERPOLATION_MODE_NEAREST: u32 = 0;
+
+#[repr(C)]
+struct SizeU {
+    width: u32,
+    height: u32,
+}
+
+#[repr(C)]
+struct BitmapProperties {
+    pixel_format: PixelFormat,
+    dpi_x: f32,
+    dpi_y: f32,
+}
 const D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT: u32 = 4;
 const DWRITE_FACTORY_TYPE_SHARED: u32 = 0;
 const DWRITE_FONT_WEIGHT_NORMAL: u32 = 400;
@@ -207,18 +221,55 @@ fn color(c: u32) -> ColorF {
 /// liso `bg` que tapa lo que había (el emoji en blanco y negro del
 /// RichEdit). Solo se dibuja la parte de `cell` que cae dentro de
 /// `clip`. `false` si no se pudo (y entonces queda lo que había).
-pub fn draw_emoji(hdc: HDC, cell: RECT, clip: RECT, text: &[u16], size_px: u32, bg: u32) -> bool {
+/// Con `bg` en `None`, sobre lo que ya hay pintado en `hdc`.
+pub fn draw_emoji(hdc: HDC, cell: RECT, clip: RECT, text: &[u16], size_px: u32, bg: Option<u32>) -> bool {
     draw(hdc, cell, clip, text, ("Segoe UI Emoji", DWRITE_FONT_WEIGHT_NORMAL, size_px * 10, true), 0, bg)
 }
 
 /// El título de una nota, en semibold, con "…" si no entra y los emojis
 /// en color (con GDI salían en gris, al lado de los del texto en color).
-pub fn draw_title(hdc: HDC, rect: RECT, text: &str, ink: u32, bg: u32, size_px: i32) -> bool {
+pub fn draw_title(hdc: HDC, rect: RECT, text: &str, ink: u32, bg: Option<u32>, size_px: i32) -> bool {
     let w: Vec<u16> = text.encode_utf16().collect();
     draw(hdc, rect, rect, &w, ("Segoe UI", DWRITE_FONT_WEIGHT_SEMIBOLD, size_px.max(1) as u32 * 10, false), ink, bg)
 }
 
-fn draw(hdc: HDC, cell: RECT, clip: RECT, text: &[u16], key: Key, fg: u32, bg: u32) -> bool {
+/// Lo que hay pintado en `bound` de `hdc`, como bitmap de Direct2D (para
+/// el render target `rt`, ya atado al DC). Nulo si no se pudo.
+unsafe fn copy_under(rt: *mut c_void, hdc: HDC, bound: &RECT) -> *mut c_void {
+    use windows_sys::Win32::Graphics::Gdi::*;
+    let (w, h) = (bound.right - bound.left, bound.bottom - bound.top);
+    let mut bi: BITMAPINFO = std::mem::zeroed();
+    bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -h;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    let mut bits: *mut c_void = null_mut();
+    let dib = CreateDIBSection(hdc, &bi, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+    if dib.is_null() || bits.is_null() {
+        return null_mut();
+    }
+    let mem = CreateCompatibleDC(hdc);
+    let old = SelectObject(mem, dib);
+    BitBlt(mem, 0, 0, w, h, hdc, bound.left, bound.top, SRCCOPY);
+    GdiFlush();
+    let props = BitmapProperties {
+        pixel_format: PixelFormat { format: DXGI_FORMAT_B8G8R8A8_UNORM, alpha_mode: D2D1_ALPHA_MODE_IGNORE },
+        dpi_x: 96.0,
+        dpi_y: 96.0,
+    };
+    let mut bitmap: *mut c_void = null_mut();
+    // ID2D1RenderTarget::CreateBitmap (copia los píxeles)
+    let create: unsafe extern "system" fn(*mut c_void, SizeU, *const c_void, u32, *const BitmapProperties, *mut *mut c_void) -> i32 =
+        method(rt, 4);
+    create(rt, SizeU { width: w as u32, height: h as u32 }, bits, (w * 4) as u32, &props, &mut bitmap);
+    SelectObject(mem, old);
+    DeleteDC(mem);
+    DeleteObject(dib);
+    bitmap
+}
+
+fn draw(hdc: HDC, cell: RECT, clip: RECT, text: &[u16], key: Key, fg: u32, bg: Option<u32>) -> bool {
     let bound = RECT {
         left: cell.left.max(clip.left),
         top: cell.top.max(clip.top),
@@ -239,21 +290,29 @@ fn draw(hdc: HDC, cell: RECT, clip: RECT, text: &[u16], key: Key, fg: u32, bg: u
             return false;
         }
         let rt = e.target;
+        // Sin fondo propio: el DC render target no mezcla con lo que había
+        // (lo pisa, negro donde no dibuja). Se copia lo que hay debajo y se
+        // lo usa de fondo; así el texto va además con ClearType.
+        let under = if bg.is_none() { copy_under(rt, hdc, &bound) } else { null_mut() };
         // ID2D1DCRenderTarget::BindDC — al rectángulo que se ve, así lo
         // que quede afuera no se toca.
         let bind: unsafe extern "system" fn(*mut c_void, HDC, *const RECT) -> i32 = method(rt, 57);
         if bind(rt, hdc, &bound) < 0 {
+            release(under);
             return false;
         }
         let mut bg_brush: *mut c_void = null_mut();
         let mut fg_brush: *mut c_void = null_mut();
         // ID2D1RenderTarget::CreateSolidColorBrush
         let brush: unsafe extern "system" fn(*mut c_void, *const ColorF, *const c_void, *mut *mut c_void) -> i32 = method(rt, 8);
-        brush(rt, &color(bg), std::ptr::null(), &mut bg_brush);
+        if let Some(bg) = bg {
+            brush(rt, &color(bg), std::ptr::null(), &mut bg_brush);
+        }
         brush(rt, &color(fg), std::ptr::null(), &mut fg_brush);
-        if bg_brush.is_null() || fg_brush.is_null() {
+        if (bg.is_some() && bg_brush.is_null()) || fg_brush.is_null() {
             release(bg_brush);
             release(fg_brush);
+            release(under);
             return false;
         }
         // Coordenadas relativas al rectángulo atado.
@@ -271,7 +330,13 @@ fn draw(hdc: HDC, cell: RECT, clip: RECT, text: &[u16], key: Key, fg: u32, bg: u
             method(rt, 27);
         let end: unsafe extern "system" fn(*mut c_void, *mut u64, *mut u64) -> i32 = method(rt, 49);
         begin(rt);
-        fill(rt, &whole, bg_brush);
+        if !under.is_null() {
+            // ID2D1RenderTarget::DrawBitmap
+            let draw_bitmap: unsafe extern "system" fn(*mut c_void, *mut c_void, *const RectF, f32, u32, *const RectF) = method(rt, 26);
+            draw_bitmap(rt, under, &whole, 1.0, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST, std::ptr::null());
+        } else if !bg_brush.is_null() {
+            fill(rt, &whole, bg_brush);
+        }
         draw_text(
             rt,
             text.as_ptr(),
@@ -285,6 +350,7 @@ fn draw(hdc: HDC, cell: RECT, clip: RECT, text: &[u16], key: Key, fg: u32, bg: u
         let hr = end(rt, null_mut(), null_mut());
         release(bg_brush);
         release(fg_brush);
+        release(under);
         if hr < 0 {
             // D2DERR_RECREATE_TARGET u otra falla: se arma todo de nuevo
             // la próxima vez.

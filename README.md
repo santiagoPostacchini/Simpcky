@@ -29,7 +29,7 @@ cargo build --release
 En debug (`cargo run`) el binario abre una consola detrás; en release no
 (`#![windows_subsystem = "windows"]`).
 
-## Estado actual (v0.4)
+## Estado actual (v0.4.1)
 
 Ya funciona:
 
@@ -79,6 +79,16 @@ Ya funciona:
   DirectWrite.
 - **Escala**: encabezado, botones, márgenes y menús siguen los ppp del
   monitor (a 150 % antes todo quedaba chico).
+- **Notas translúcidas** (`backdrop.rs`): en el escritorio, cada nota
+  muestra el fondo de pantalla desenfocado con su color encima, como el
+  acrílico de Windows 11 o el mod "Translucent Windows" de Windhawk.
+  Windows (y ese mod) solo aplican el efecto a ventanas de primer nivel,
+  y una nota anclada es hija del escritorio: se imita. El fondo se pide a
+  `IDesktopWallpaper` (con su ubicación en cada monitor), se achica, se
+  desenfoca una sola vez y cada nota pinta su pedazo; el RichEdit va
+  transparente. Intensidad en el menú de la bandeja → Transparencia de
+  las notas (apagada, suave, media, fuerte). Sueltas o siempre encima,
+  las notas se pintan lisas (lo que tienen detrás no es el fondo).
 - **Barra de desplazamiento fina**, del color de la nota: la de Windows
   queda recortada fuera de la vista y se dibuja una rayita que se
   ensancha con el mouse y se arrastra.
@@ -265,6 +275,8 @@ se vería pero no se podría escribir ni arrastrar.
   formato, íconos de Segoe Fluent Icons).
 - `src/d2d.rs` — Direct2D/DirectWrite a mano (emojis y títulos en
   color).
+- `src/backdrop.rs` — el fondo de pantalla desenfocado de las notas
+  translúcidas.
 - `src/desktop.rs` — anclar una nota al escritorio (el padre de los
   íconos).
 - `src/allnotes.rs` — ventana "Todas las notas": buscador y grilla de

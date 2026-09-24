@@ -613,9 +613,18 @@ fn paint(hwnd: HWND, hdc: HDC) {
         let old_bmp = SelectObject(mem, bmp);
 
         let header_rect = RECT { left: 0, top: 0, right: width, bottom: hh };
-        let brush = CreateSolidBrush(header_color);
-        FillRect(mem, &header_rect, brush);
-        DeleteObject(brush);
+        let see_through = backdrop_opacity(hwnd);
+        let mut screen = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        GetWindowRect(hwnd, &mut screen);
+        let painted = see_through.is_some_and(|(ha, _)| {
+            let r = RECT { left: screen.left, top: screen.top, right: screen.left + width, bottom: screen.top + hh };
+            crate::backdrop::paint(mem, header_rect, r, header_color, ha)
+        });
+        if !painted {
+            let brush = CreateSolidBrush(header_color);
+            FillRect(mem, &header_rect, brush);
+            DeleteObject(brush);
+        }
         SetBkMode(mem, TRANSPARENT as i32);
 
         if layout.buttons {
@@ -633,7 +642,12 @@ fn paint(hwnd: HWND, hdc: HDC) {
             }
             for (hit, rect, glyph) in buttons {
                 if hot == Some(hit) {
-                    flyout::fill_round(g, &rect, px(hwnd, 5) as f32, hover_bg);
+                    if painted {
+                        let argb = (colorref_to_argb(ink) & 0x00ff_ffff) | 0x30 << 24;
+                        flyout::fill_round_argb(g, &rect, px(hwnd, 5) as f32, argb);
+                    } else {
+                        flyout::fill_round(g, &rect, px(hwnd, 5) as f32, hover_bg);
+                    }
                 }
                 flyout::draw_glyph(mem, flyout::icon_font(-px(hwnd, 15)), glyph, &rect, ink);
             }
@@ -646,7 +660,8 @@ fn paint(hwnd: HWND, hdc: HDC) {
 
         // El título (el nombre, o la primera línea del texto) se ve
         // siempre en el encabezado, esté enrollada o no.
-        if !renaming && !crate::d2d::draw_title(mem, layout.title_rect, &title, ink, header_color, px(hwnd, 15)) {
+        let title_bg = if painted { None } else { Some(header_color) };
+        if !renaming && !crate::d2d::draw_title(mem, layout.title_rect, &title, ink, title_bg, px(hwnd, 15)) {
             // Sin DirectWrite (no debería pasar): con GDI, emojis en gris.
             let old_font = SelectObject(mem, header_font(hwnd));
             SetTextColor(mem, ink);
@@ -660,9 +675,7 @@ fn paint(hwnd: HWND, hdc: HDC) {
         // Debajo del encabezado: el margen alrededor del texto (el
         // RichEdit tapa el resto; WS_CLIPCHILDREN evita pisarlo).
         if client.bottom > hh {
-            let body = CreateSolidBrush(body_color);
-            FillRect(hdc, &RECT { left: 0, top: hh, right: width, bottom: client.bottom }, body);
-            DeleteObject(body);
+            fill_body(hwnd, hdc, RECT { left: 0, top: hh, right: width, bottom: client.bottom }, body_color);
         }
         SelectObject(mem, old_bmp);
         DeleteObject(bmp);
@@ -1338,6 +1351,13 @@ fn on_create(hwnd: HWND) {
     crate::theme::apply_scrollbars(edit);
     apply_text_padding(edit, w, rc.bottom - rc.top);
     create_tooltips(hwnd);
+    {
+        let mut a = app().lock().unwrap();
+        if let Some(nr) = a.notes.get_mut(&id) {
+            nr.edit = edit as isize; // para `refresh_backdrop`, que la busca acá
+        }
+    }
+    editor::set_backdrop(edit, backdrop_opacity(hwnd).map(|(_, b)| b));
     if rolled && !edit.is_null() {
         unsafe { ShowWindow(edit, SW_HIDE) };
     }
@@ -1426,10 +1446,58 @@ fn on_erase(hwnd: HWND, hdc: HDC) {
         FillRect(hdc, &RECT { bottom: hh.min(rc.bottom), ..rc }, b);
         DeleteObject(b);
         if rc.bottom > hh {
-            let b = CreateSolidBrush(body);
-            FillRect(hdc, &RECT { top: hh, ..rc }, b);
-            DeleteObject(b);
+            fill_body(hwnd, hdc, RECT { top: hh, ..rc }, body);
         }
+    }
+}
+
+/// Opacidad del color de la nota sobre el fondo de pantalla (encabezado,
+/// cuerpo), o `None` si se pinta lisa: sin transparencia elegida, o
+/// porque no está en el escritorio (suelta, flota sobre otras ventanas, y
+/// lo que tiene detrás no es el fondo de pantalla).
+fn backdrop_opacity(hwnd: HWND) -> Option<(u8, u8)> {
+    let anchored = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32 & WS_CHILD != 0;
+    if !anchored {
+        return None;
+    }
+    crate::backdrop::opacity(app().lock().unwrap().settings.translucency)
+}
+
+/// El cuerpo de la nota en `r` (coordenadas de la nota): liso o translúcido.
+fn fill_body(hwnd: HWND, hdc: HDC, r: RECT, body: u32) {
+    unsafe {
+        if let Some((_, ba)) = backdrop_opacity(hwnd) {
+            let mut screen = r;
+            MapWindowPoints(hwnd, null_mut(), &mut screen as *mut RECT as *mut POINT, 2);
+            if crate::backdrop::paint(hdc, r, screen, body, ba) {
+                return;
+            }
+        }
+        let b = CreateSolidBrush(body);
+        FillRect(hdc, &r, b);
+        DeleteObject(b);
+    }
+}
+
+/// El fondo translúcido depende de dónde está la nota en la pantalla (y
+/// de si está en el escritorio): se lo dice al texto y se repinta todo.
+fn refresh_backdrop(hwnd: HWND) {
+    let id = note_id(hwnd);
+    let edit = app().lock().unwrap().notes.get(&id).map(|nr| nr.edit as HWND).unwrap_or(null_mut());
+    if !edit.is_null() {
+        editor::set_backdrop(edit, backdrop_opacity(hwnd).map(|(_, b)| b));
+    }
+    unsafe { RedrawWindow(hwnd, null(), null_mut(), RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW) };
+}
+
+/// Otro nivel de transparencia, u otro fondo de pantalla: todas las notas.
+pub fn refresh_backdrops() {
+    if app().lock().unwrap().settings.translucency > 0 {
+        crate::backdrop::warm();
+    }
+    let list: Vec<HWND> = app().lock().unwrap().notes.values().map(|nr| nr.hwnd as HWND).filter(|h| !h.is_null()).collect();
+    for h in list {
+        refresh_backdrop(h);
     }
 }
 
@@ -1873,8 +1941,18 @@ pub unsafe extern "system" fn note_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM,
         WM_STYLECHANGED => {
             if wparam as i32 == GWL_STYLE {
                 update_shape(hwnd);
+                refresh_backdrop(hwnd);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        // Translúcida, lo que se ve detrás depende de dónde está: al
+        // moverla se repinta entera (el sistema mueve la imagen vieja tal
+        // cual, con el pedazo de fondo que ya no le corresponde).
+        WM_MOVE => {
+            if backdrop_opacity(hwnd).is_some() {
+                RedrawWindow(hwnd, null(), null_mut(), RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+            }
+            0
         }
         WM_LBUTTONDOWN => {
             on_lbuttondown(hwnd, lparam);
