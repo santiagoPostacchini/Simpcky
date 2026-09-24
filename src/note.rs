@@ -1376,9 +1376,37 @@ fn on_size(hwnd: HWND, lparam: LPARAM) {
     let w = (lparam & 0xffff) as i32;
     let total_h = ((lparam >> 16) & 0xffff) as i32;
     let rc = edit_rect(hwnd, w, total_h);
-    unsafe { SetWindowPos(edit, null_mut(), rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, SWP_NOZORDER) };
+    unsafe {
+        SetWindowPos(edit, null_mut(), rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, SWP_NOZORDER | SWP_NOCOPYBITS);
+    }
     apply_text_padding(edit, w, rc.bottom - rc.top);
-    unsafe { InvalidateRect(hwnd, null(), 0) };
+    // Pintar ya, no "cuando se pueda": en un cambio de tamaño rápido
+    // Windows muestra la parte nueva de la ventana antes de que la app la
+    // pinte (en blanco, o la imagen vieja estirada), y el WM_PAINT recién
+    // llegaba cuando el mouse se quedaba quieto.
+    unsafe { RedrawWindow(hwnd, null(), null_mut(), RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_ALLCHILDREN) };
+}
+
+/// El fondo, con los colores de la nota (encabezado y cuerpo): lo que se
+/// vea antes de que llegue el dibujo de verdad tiene que ser la nota, no
+/// un rectángulo blanco.
+fn on_erase(hwnd: HWND, hdc: HDC) {
+    let id = note_id(hwnd);
+    let Some(color) = app().lock().unwrap().notes.get(&id).map(|nr| nr.data.color) else { return };
+    let (header, body, _) = palette_entry(color);
+    let hh = header_h(hwnd);
+    unsafe {
+        let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        GetClientRect(hwnd, &mut rc);
+        let b = CreateSolidBrush(header);
+        FillRect(hdc, &RECT { bottom: hh.min(rc.bottom), ..rc }, b);
+        DeleteObject(b);
+        if rc.bottom > hh {
+            let b = CreateSolidBrush(body);
+            FillRect(hdc, &RECT { top: hh, ..rc }, b);
+            DeleteObject(b);
+        }
+    }
 }
 
 /// Fin de un arrastre o de un resize (WM_EXITSIZEMOVE cubre ambos).
@@ -1808,7 +1836,10 @@ pub unsafe extern "system" fn note_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM,
             paint(hwnd, wparam as HDC);
             0
         }
-        WM_ERASEBKGND => 1,
+        WM_ERASEBKGND => {
+            on_erase(hwnd, wparam as HDC);
+            1
+        }
         WM_SIZE => {
             on_size(hwnd, lparam);
             0
