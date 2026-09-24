@@ -11,10 +11,16 @@
 //!
 //! Con las tarjetas:
 //! - doble clic / Enter: abrir la nota (se asoma al frente, ver
-//!   `note::open_note`);
+//!   `note::open_note`), también si estaba guardada acá (oculta);
 //! - arrastrarla afuera de la ventana y soltarla sobre el escritorio:
 //!   la nota queda ahí como widget (ver `ghost.rs`);
-//! - clic derecho: abrir, cambiar nombre, eliminar.
+//! - clic derecho: abrir, ocultar, cambiar nombre, eliminar.
+//!
+//! Las notas ocultas (`NoteData::hidden`) viven solo acá: tarjeta más
+//! apagada y con el ojo tachado.
+//!
+//! El engranaje al lado del buscador pasa a la otra pestaña,
+//! "Configuración y sincronización" (ver `settings.rs`).
 //!
 //! Nada de esto existe como control nativo de Windows, así que se pinta
 //! a mano: GDI+ para las formas redondeadas con antialiasing y GDI para
@@ -31,7 +37,9 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::app::app;
+use crate::flyout;
 use crate::note;
+use crate::settings;
 use crate::persist::{Layer, NoteData};
 use crate::theme;
 use crate::win::{from_wide, wide};
@@ -56,9 +64,18 @@ const SEARCH_R: i32 = 8;
 const MENU_OPEN: usize = 1;
 const MENU_RENAME: usize = 2;
 const MENU_DELETE: usize = 3;
+const MENU_HIDE: usize = 4;
+
+/// Qué muestra la ventana.
+#[derive(Clone, Copy, PartialEq)]
+enum View {
+    Notes,
+    Settings,
+}
 
 struct Item {
-    hwnd: isize,
+    id: u32,
+    hidden: bool,
     color: u8,
     pinned: bool,
     rolled: bool,
@@ -75,8 +92,14 @@ struct State {
     items: Vec<Item>,
     sel: i32,
     hover: i32,
-    hover_theme_btn: bool,
+    /// El mouse sobre el botón de arriba (engranaje, o volver).
+    hover_top_btn: bool,
     scroll: i32,
+    view: View,
+    /// Lo que está bajo el mouse en la configuración.
+    settings_hover: settings::Hit,
+    /// Dónde estaba la lista al pasar a la configuración.
+    notes_scroll: i32,
     /// Tarjeta apretada con el botón izquierdo (-1 = ninguna), dónde, y
     /// si ya se convirtió en arrastre.
     press: i32,
@@ -98,8 +121,11 @@ fn state() -> &'static Mutex<State> {
             items: Vec::new(),
             sel: -1,
             hover: -1,
-            hover_theme_btn: false,
+            hover_top_btn: false,
             scroll: 0,
+            view: View::Notes,
+            settings_hover: settings::Hit::None,
+            notes_scroll: 0,
             press: -1,
             press_pt: POINT { x: 0, y: 0 },
             grab: POINT { x: 0, y: 0 },
@@ -132,16 +158,77 @@ pub fn register_class(hinstance: HINSTANCE) {
     }
 }
 
-/// Abre la ventana (o, si ya está abierta, la trae al frente).
+/// Abre la ventana en la lista de notas (o, si ya está abierta, la trae
+/// al frente).
 pub fn show() {
+    open(View::Notes);
+}
+
+/// Abre la ventana en "Configuración y sincronización".
+pub fn show_settings() {
+    open(View::Settings);
+}
+
+fn open(view: View) {
     let existing = state().lock().unwrap().hwnd;
     if existing != 0 {
         let hwnd = existing as HWND;
         crate::win::show_normal(hwnd);
+        set_view(hwnd, view);
         refresh_list(hwnd);
         return;
     }
+    create();
+    let hwnd = state().lock().unwrap().hwnd as HWND;
+    if !hwnd.is_null() {
+        set_view(hwnd, view);
+    }
+}
 
+/// Pasa de la lista a la configuración, o al revés.
+fn set_view(hwnd: HWND, view: View) {
+    let edit = {
+        let mut s = state().lock().unwrap();
+        if s.view == view {
+            return;
+        }
+        if view == View::Settings {
+            s.notes_scroll = s.scroll;
+            s.scroll = 0;
+        } else {
+            s.scroll = s.notes_scroll;
+        }
+        s.view = view;
+        s.hover = -1;
+        s.hover_top_btn = false;
+        s.settings_hover = settings::Hit::None;
+        s.edit as HWND
+    };
+    unsafe {
+        if !edit.is_null() {
+            ShowWindow(edit, if view == View::Settings { SW_HIDE } else { SW_SHOW });
+        }
+        SetFocus(if view == View::Settings || edit.is_null() { hwnd } else { edit });
+    }
+    update_title(hwnd);
+    update_scrollbar(hwnd);
+    unsafe { InvalidateRect(hwnd, null(), 0) };
+}
+
+fn view() -> View {
+    state().lock().unwrap().view
+}
+
+fn update_title(hwnd: HWND) {
+    let title = match view() {
+        View::Notes => format!("Todas las notas ({})", app().lock().unwrap().notes.len()),
+        View::Settings => "Configuración y sincronización".to_string(),
+    };
+    let w = wide(&title);
+    unsafe { SetWindowTextW(hwnd, w.as_ptr()) };
+}
+
+fn create() {
     let hinstance = { app().lock().unwrap().hinstance } as HINSTANCE;
     let class_name = wide(CLASS_NAME);
     let title = wide("Todas las notas");
@@ -229,7 +316,7 @@ fn get_window_text(hwnd: HWND) -> String {
 /// El texto de la vista previa: todo lo que no es el título. Si la
 /// nota tiene nombre propio, el cuerpo entero; si no, desde la segunda
 /// línea (la primera ya se muestra como título).
-fn preview_of(data: &NoteData) -> String {
+pub(crate) fn preview_of(data: &NoteData) -> String {
     let skip = if data.title.trim().is_empty() { 1 } else { 0 };
     let body: String = data
         .text
@@ -251,12 +338,12 @@ fn refresh_list(hwnd: HWND) {
         let mut v: Vec<(u32, Item)> = a
             .notes
             .values()
-            .filter(|nr| nr.hwnd != 0)
             .map(|nr| {
                 (
                     nr.data.id,
                     Item {
-                        hwnd: nr.hwnd,
+                        id: nr.data.id,
+                        hidden: nr.data.hidden,
                         color: nr.data.color,
                         pinned: nr.data.layer == Layer::AlwaysOnTop,
                         rolled: nr.data.rolled,
@@ -278,22 +365,19 @@ fn refresh_list(hwnd: HWND) {
     {
         let mut s = state().lock().unwrap();
         // Conservar la tarjeta seleccionada aunque cambie de lugar.
-        let selected = if s.sel >= 0 { s.items.get(s.sel as usize).map(|it| it.hwnd) } else { None };
+        let selected = if s.sel >= 0 { s.items.get(s.sel as usize).map(|it| it.id) } else { None };
         s.items = items;
         s.hover = -1;
-        s.sel = selected.and_then(|h| s.items.iter().position(|it| it.hwnd == h)).map(|i| i as i32).unwrap_or(-1);
+        s.sel = selected.and_then(|id| s.items.iter().position(|it| it.id == id)).map(|i| i as i32).unwrap_or(-1);
         if count > 0 && s.sel < 0 {
             s.sel = 0;
         }
     }
 
     if !hwnd.is_null() {
-        let title = wide(&format!("Todas las notas ({count})"));
-        unsafe {
-            SetWindowTextW(hwnd, title.as_ptr());
-            update_scrollbar(hwnd);
-            InvalidateRect(hwnd, null(), 0);
-        }
+        update_title(hwnd);
+        update_scrollbar(hwnd);
+        unsafe { InvalidateRect(hwnd, null(), 0) };
     }
 }
 
@@ -312,9 +396,26 @@ fn grid_top() -> i32 {
     PAD + SEARCH_H + PAD
 }
 
-/// El botón de tema, a la derecha del buscador.
-fn theme_btn_rect(cw: i32) -> RECT {
-    RECT { left: cw - PAD - SEARCH_H, top: PAD, right: cw - PAD, bottom: PAD + SEARCH_H }
+/// El botón de arriba: el engranaje, a la derecha del buscador; en la
+/// configuración, "volver", a la izquierda.
+fn top_btn_rect(cw: i32) -> RECT {
+    if view() == View::Settings {
+        RECT { left: PAD, top: PAD, right: PAD + SEARCH_H, bottom: PAD + SEARCH_H }
+    } else {
+        RECT { left: cw - PAD - SEARCH_H, top: PAD, right: cw - PAD, bottom: PAD + SEARCH_H }
+    }
+}
+
+/// Alto de lo que se desplaza: la grilla o la configuración.
+fn content_height(cw: i32) -> i32 {
+    let s = state().lock().unwrap();
+    match s.view {
+        View::Notes => grid_layout(&s.items, cw).1,
+        View::Settings => {
+            drop(s);
+            settings::height(cw)
+        }
+    }
 }
 
 fn search_rect(cw: i32) -> RECT {
@@ -352,10 +453,7 @@ fn grid_layout(items: &[Item], client_w: i32) -> (Vec<RECT>, i32) {
 
 fn update_scrollbar(hwnd: HWND) {
     let (cw, ch) = client_size(hwnd);
-    let total = {
-        let s = state().lock().unwrap();
-        grid_layout(&s.items, cw).1
-    };
+    let total = content_height(cw);
     let view = (ch - grid_top()).max(1);
     let max_scroll = (total - view).max(0);
     let scroll = {
@@ -376,10 +474,7 @@ fn update_scrollbar(hwnd: HWND) {
 
 fn set_scroll(hwnd: HWND, value: i32) {
     let (cw, ch) = client_size(hwnd);
-    let total = {
-        let s = state().lock().unwrap();
-        grid_layout(&s.items, cw).1
-    };
+    let total = content_height(cw);
     let max_scroll = (total - (ch - grid_top()).max(1)).max(0);
     let next = value.clamp(0, max_scroll);
     let changed = {
@@ -398,7 +493,7 @@ fn set_scroll(hwnd: HWND, value: i32) {
 /// pantalla de cliente, o -1.
 fn hit_test(hwnd: HWND, x: i32, y: i32) -> (i32, RECT) {
     let none = (-1, RECT { left: 0, top: 0, right: 0, bottom: 0 });
-    if y < grid_top() {
+    if y < grid_top() || view() != View::Notes {
         return none;
     }
     let (cw, _) = client_size(hwnd);
@@ -504,31 +599,6 @@ unsafe fn draw_magnifier(g: *mut GpGraphics, cx: i32, cy: i32, color: u32) {
     GdipDeletePen(pen);
 }
 
-/// Luna (en claro: "pasar a oscuro") o sol (en oscuro: "pasar a claro").
-unsafe fn draw_theme_icon(g: *mut GpGraphics, cx: i32, cy: i32, dark: bool, ink: u32, bg: u32) {
-    let mut brush: *mut GpSolidFill = null_mut();
-    GdipCreateSolidFill(argb(0xff, ink), &mut brush);
-    if dark {
-        GdipFillEllipseI(g, brush as *mut GpBrush, cx - 4, cy - 4, 8, 8);
-        let pen = round_pen(argb(0xff, ink), 1.6);
-        for k in 0..8 {
-            let a = k as f32 * std::f32::consts::FRAC_PI_4;
-            let (s, c) = a.sin_cos();
-            GdipDrawLine(g, pen, cx as f32 + c * 6.5, cy as f32 + s * 6.5, cx as f32 + c * 8.5, cy as f32 + s * 8.5);
-        }
-        GdipDeletePen(pen);
-    } else {
-        // Media luna: un disco, menos otro disco corrido pintado del
-        // color del botón.
-        GdipFillEllipseI(g, brush as *mut GpBrush, cx - 7, cy - 7, 14, 14);
-        let mut cut: *mut GpSolidFill = null_mut();
-        GdipCreateSolidFill(argb(0xff, bg), &mut cut);
-        GdipFillEllipseI(g, cut as *mut GpBrush, cx - 3, cy - 10, 13, 13);
-        GdipDeleteBrush(cut as *mut GpBrush);
-    }
-    GdipDeleteBrush(brush as *mut GpBrush);
-}
-
 /// El mismo pin del encabezado de la nota, en chiquito, para marcar
 /// las que están en "siempre encima".
 unsafe fn draw_pin(g: *mut GpGraphics, cx: i32, cy: i32, ink: u32) {
@@ -541,14 +611,30 @@ unsafe fn draw_pin(g: *mut GpGraphics, cx: i32, cy: i32, ink: u32) {
     GdipDeletePen(pen);
 }
 
+/// Con el mod "Translucent Windows" de Windhawk la ventana es de vidrio,
+/// y cada píxel se compone según su alfa: lo que pinta GDI (el fondo, el
+/// cuadro de texto del buscador) lleva alfa 0 y se ve como vidrio
+/// teñido, y lo de GDI+ lleva alfa entero y se ve macizo. La píldora del
+/// buscador rodea al cuadro de texto: si no se compone igual que él,
+/// adentro se ve un rectángulo de otro tono. Así que la barra de arriba
+/// va toda "como GDI". (Sin el mod, el alfa no se usa.)
+unsafe fn like_gdi(bits: *mut u32, w: i32, h: i32, r: &RECT) {
+    GdiFlush();
+    for y in r.top.max(0)..r.bottom.min(h) {
+        for x in r.left.max(0)..r.right.min(w) {
+            *bits.add((y * w + x) as usize) &= 0x00ff_ffff;
+        }
+    }
+}
+
 fn on_paint(hwnd: HWND) {
     let (cw, ch) = client_size(hwnd);
-    let (ui_font, title_font, hover_btn) = {
+    let (ui_font, title_font, hover_btn, view, settings_hover, scroll) = {
         let s = state().lock().unwrap();
-        (s.ui_font as HFONT, s.title_font as HFONT, s.hover_theme_btn)
+        (s.ui_font as HFONT, s.title_font as HFONT, s.hover_top_btn, s.view, s.settings_hover, s.scroll)
     };
     let c = theme::chrome();
-    let dark = theme::is_dark();
+    let (w, h) = (cw.max(1), ch.max(1));
 
     unsafe {
         let mut ps: PAINTSTRUCT = std::mem::zeroed();
@@ -556,32 +642,73 @@ fn on_paint(hwnd: HWND) {
 
         // Doble buffer: la grilla se repinta entera en cada scroll y en
         // cada cambio del buscador; pintando directo sobre el DC de la
-        // ventana se vería el parpadeo de siempre.
+        // ventana se vería el parpadeo de siempre. En un DIB, para poder
+        // tocar el alfa (ver `like_gdi`).
+        let mut bi: BITMAPINFO = std::mem::zeroed();
+        bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        bi.bmiHeader.biWidth = w;
+        bi.bmiHeader.biHeight = -h;
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        let mut bits: *mut std::ffi::c_void = null_mut();
+        let bmp = CreateDIBSection(hdc, &bi, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+        if bmp.is_null() || bits.is_null() {
+            EndPaint(hwnd, &ps);
+            return;
+        }
+        let bits = bits as *mut u32;
         let mem = CreateCompatibleDC(hdc);
-        let bmp = CreateCompatibleBitmap(hdc, cw.max(1), ch.max(1));
         let old_bmp = SelectObject(mem, bmp);
 
         let bg = CreateSolidBrush(c.window);
         let full = RECT { left: 0, top: 0, right: cw, bottom: ch };
         FillRect(mem, &full, bg);
         DeleteObject(bg);
+        SetBkMode(mem, TRANSPARENT as i32);
 
+        // La barra de arriba: buscador y engranaje, o volver y el título.
+        let br = top_btn_rect(cw);
+        let sr = search_rect(cw);
         let mut g: *mut GpGraphics = null_mut();
         if GdipCreateFromHDC(mem, &mut g) == Ok && !g.is_null() {
             GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
-            // Píldora del buscador (el EDIT real vive adentro).
-            let sr = search_rect(cw);
-            fill_round_rect(g, &sr, SEARCH_R, argb(0xff, c.surface));
-            draw_magnifier(g, sr.left + 18, sr.top + SEARCH_H / 2, c.muted);
-            // Botón de tema.
-            let br = theme_btn_rect(cw);
-            let btn_bg = if hover_btn { c.surface_hover } else { c.surface };
-            fill_round_rect(g, &br, SEARCH_R, argb(0xff, btn_bg));
-            draw_theme_icon(g, (br.left + br.right) / 2, (br.top + br.bottom) / 2, dark, c.text, btn_bg);
+            if view == View::Notes {
+                // Píldora del buscador (el EDIT real vive adentro).
+                fill_round_rect(g, &sr, SEARCH_R, argb(0xff, c.surface));
+            }
+            fill_round_rect(g, &br, SEARCH_R, argb(0xff, if hover_btn { c.surface_hover } else { c.surface }));
             GdipDeleteGraphics(g);
         }
+        if view == View::Notes {
+            like_gdi(bits, w, h, &sr);
+        }
+        like_gdi(bits, w, h, &br);
+        let mut g: *mut GpGraphics = null_mut();
+        if view == View::Notes && GdipCreateFromHDC(mem, &mut g) == Ok && !g.is_null() {
+            GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
+            draw_magnifier(g, sr.left + 18, sr.top + SEARCH_H / 2, c.muted);
+            GdipDeleteGraphics(g);
+        }
+        let glyph = if view == View::Notes { 0xE713 } else { 0xE72B }; // engranaje / volver
+        flyout::draw_glyph(mem, flyout::icon_font(-16), glyph, &br, c.text);
 
-        draw_cards(mem, cw, ch, ui_font, title_font);
+        match view {
+            View::Notes => draw_cards(mem, cw, ch, ui_font, title_font),
+            View::Settings => {
+                let mut title = RECT { left: br.right + 10, top: br.top, right: cw - PAD, bottom: br.bottom };
+                let old = SelectObject(mem, title_font);
+                SetTextColor(mem, c.text);
+                let t = wide("Configuración y sincronización");
+                DrawTextW(mem, t.as_ptr(), -1, &mut title, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS);
+                SelectObject(mem, old);
+                // Lo que se desplaza no pasa por encima de la barra.
+                let clip = CreateRectRgn(0, grid_top(), cw, ch);
+                SelectClipRgn(mem, clip);
+                settings::paint(mem, cw, grid_top() - scroll, settings_hover);
+                SelectClipRgn(mem, null_mut());
+                DeleteObject(clip);
+            }
+        }
 
         BitBlt(hdc, 0, 0, cw, ch, mem, 0, 0, SRCCOPY);
         SelectObject(mem, old_bmp);
@@ -628,6 +755,9 @@ unsafe fn draw_cards(hdc: HDC, cw: i32, ch: i32, ui_font: HFONT, title_font: HFO
         }
         let it = &s.items[i];
         let (header, body, ink) = theme::note_colors(it.color);
+        // Oculta (solo vive acá): la tarjeta, apagada.
+        let faded = |col: u32| if it.hidden { mix(col, c.window, 0.5) } else { col };
+        let ink = faded(ink);
         // La tarjeta que se está arrastrando queda "vacía" en su lugar.
         let dragged = s.dragging && i as i32 == s.press;
 
@@ -641,7 +771,7 @@ unsafe fn draw_cards(hdc: HDC, cw: i32, ch: i32, ui_font: HFONT, title_font: HFO
             }
             // En oscuro el cuerpo es casi negro: la tarjeta lleva el
             // color del encabezado, para que se reconozca de un vistazo.
-            let fill = if theme::is_dark() { mix(body, header, 0.55) } else { body };
+            let fill = faded(if theme::is_dark() { mix(body, header, 0.55) } else { body });
             fill_round_rect(g, &rr, CARD_R, argb(0xff, fill));
             if i as i32 == s.sel {
                 stroke_round_rect(g, &rr, CARD_R, argb(0xff, ink), 2.0);
@@ -654,8 +784,13 @@ unsafe fn draw_cards(hdc: HDC, cw: i32, ch: i32, ui_font: HFONT, title_font: HFO
             GdipDeleteGraphics(g);
         }
 
-        let fill = if theme::is_dark() { mix(body, header, 0.55) } else { body };
-        let text_right = rr.right - 8 - if it.pinned { 12 } else { 0 };
+        let fill = faded(if theme::is_dark() { mix(body, header, 0.55) } else { body });
+        let marks = it.pinned as i32 + it.hidden as i32;
+        if it.hidden {
+            let x = rr.right - 20 - if it.pinned { 14 } else { 0 };
+            flyout::draw_glyph(hdc, flyout::icon_font(-12), 0xED1A, &RECT { left: x, top: rr.top + 4, right: x + 16, bottom: rr.top + 20 }, ink);
+        }
+        let text_right = rr.right - 8 - marks * 14;
         let old = SelectObject(hdc, title_font);
         SetTextColor(hdc, ink);
         let mut title_rc = RECT { left: rr.left + 8, top: rr.top + 7, right: text_right, bottom: rr.top + 7 + 17 };
@@ -696,9 +831,9 @@ fn set_sel(hwnd: HWND, idx: i32) {
 fn set_hover(hwnd: HWND, idx: i32, theme_btn: bool) {
     let changed = {
         let mut s = state().lock().unwrap();
-        let changed = s.hover != idx || s.hover_theme_btn != theme_btn;
+        let changed = s.hover != idx || s.hover_top_btn != theme_btn;
         s.hover = idx;
-        s.hover_theme_btn = theme_btn;
+        s.hover_top_btn = theme_btn;
         changed
     };
     if changed {
@@ -724,36 +859,43 @@ fn move_sel(delta: i32) {
     scroll_into_view(hwnd, next);
 }
 
-fn selected_note() -> Option<HWND> {
+/// La nota seleccionada: su número y si está oculta.
+fn selected_note() -> Option<(u32, bool)> {
     let s = state().lock().unwrap();
     if s.sel < 0 {
         return None;
     }
-    s.items.get(s.sel as usize).map(|it| it.hwnd as HWND).filter(|h| !h.is_null())
+    s.items.get(s.sel as usize).map(|it| (it.id, it.hidden))
 }
 
 fn open_selected() {
-    if let Some(h) = selected_note() {
-        note::open_note(h);
+    if let Some((id, _)) = selected_note() {
+        note::open_by_id(id);
     }
 }
 
 fn rename_selected() {
-    if let Some(h) = selected_note() {
-        note::open_note(h);
-        crate::rename::begin(h);
+    if let Some((id, _)) = selected_note() {
+        let h = note::open_by_id(id);
+        if !h.is_null() {
+            crate::rename::begin(h);
+        }
     }
 }
 
 fn show_card_menu(hwnd: HWND, idx: i32) {
     set_sel(hwnd, idx);
-    let Some(target) = selected_note() else { return };
+    let Some((target, hidden)) = selected_note() else { return };
     let choice = unsafe {
         let menu = CreatePopupMenu();
         let open = wide("Abrir");
+        let hide = wide("Ocultar");
         let rename = wide("Cambiar nombre\tF2");
         let delete = wide("Eliminar nota");
         AppendMenuW(menu, MF_STRING, MENU_OPEN, open.as_ptr());
+        if !hidden {
+            AppendMenuW(menu, MF_STRING, MENU_HIDE, hide.as_ptr());
+        }
         AppendMenuW(menu, MF_STRING, MENU_RENAME, rename.as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
         AppendMenuW(menu, MF_STRING, MENU_DELETE, delete.as_ptr());
@@ -765,9 +907,12 @@ fn show_card_menu(hwnd: HWND, idx: i32) {
         choice as usize
     };
     match choice {
-        MENU_OPEN => note::open_note(target),
+        MENU_OPEN => {
+            note::open_by_id(target);
+        }
+        MENU_HIDE => note::hide_by_id(target),
         MENU_RENAME => rename_selected(),
-        MENU_DELETE => note::delete_note_confirm(target, hwnd),
+        MENU_DELETE => note::delete_by_id(target, hwnd),
         _ => {}
     }
 }
@@ -826,7 +971,7 @@ fn begin_drag(hwnd: HWND) {
 fn end_drag(hwnd: HWND, drop: bool) {
     let (dragging, target, grab) = {
         let mut s = state().lock().unwrap();
-        let info = (s.dragging, s.items.get(s.press.max(0) as usize).map(|it| it.hwnd as HWND), s.grab);
+        let info = (s.dragging, s.items.get(s.press.max(0) as usize).map(|it| it.id), s.grab);
         s.dragging = false;
         s.press = -1;
         info
@@ -840,14 +985,18 @@ fn end_drag(hwnd: HWND, drop: bool) {
     if let (true, true, Some(target)) = (drop, outside, target) {
         // La nota cae donde estaba el fantasma: su encabezado bajo el
         // cursor, igual que se la venía viendo.
-        note::drop_on_desktop(target, pt.x - grab.x, pt.y - grab.y);
+        note::drop_by_id(target, pt.x - grab.x, pt.y - grab.y);
     }
 }
 
 fn on_lbuttondown(hwnd: HWND, x: i32, y: i32) {
     let (cw, _) = client_size(hwnd);
-    if in_rect(&theme_btn_rect(cw), x, y) {
-        theme::set_dark(!theme::is_dark());
+    if in_rect(&top_btn_rect(cw), x, y) {
+        set_view(hwnd, if view() == View::Notes { View::Settings } else { View::Notes });
+        return;
+    }
+    if view() == View::Settings {
+        settings_click(hwnd, x, y);
         return;
     }
     let (idx, card) = hit_test(hwnd, x, y);
@@ -892,8 +1041,16 @@ fn on_mousemove(hwnd: HWND, x: i32, y: i32) {
         return;
     }
     let (cw, _) = client_size(hwnd);
-    let on_btn = in_rect(&theme_btn_rect(cw), x, y);
+    let on_btn = in_rect(&top_btn_rect(cw), x, y);
     set_hover(hwnd, if on_btn { -1 } else { hit_test(hwnd, x, y).0 }, on_btn);
+    let over = if on_btn { settings::Hit::None } else { settings_hit(hwnd, x, y) };
+    let changed = {
+        let mut s = state().lock().unwrap();
+        std::mem::replace(&mut s.settings_hover, over) != over
+    };
+    if changed {
+        unsafe { InvalidateRect(hwnd, null(), 0) };
+    }
     // Sin TrackMouseEvent nunca llega WM_MOUSELEAVE y la tarjeta se
     // queda resaltada al salir de la ventana.
     unsafe {
@@ -902,6 +1059,29 @@ fn on_mousemove(hwnd: HWND, x: i32, y: i32) {
         tme.dwFlags = TME_LEAVE;
         tme.hwndTrack = hwnd;
         TrackMouseEvent(&mut tme);
+    }
+}
+
+/// Qué hay de la configuración en (`x`, `y`) (coordenadas de cliente).
+fn settings_hit(hwnd: HWND, x: i32, y: i32) -> settings::Hit {
+    if view() != View::Settings || y < grid_top() {
+        return settings::Hit::None;
+    }
+    let (cw, _) = client_size(hwnd);
+    let scroll = state().lock().unwrap().scroll;
+    settings::hit(cw, x, y - grid_top() + scroll)
+}
+
+fn settings_click(hwnd: HWND, x: i32, y: i32) {
+    let hit = settings_hit(hwnd, x, y);
+    if hit == settings::Hit::None {
+        return;
+    }
+    settings::click(hit);
+    // Puede haber cambiado lo que se muestra (y cuánto mide).
+    if state().lock().unwrap().hwnd == hwnd as isize {
+        update_scrollbar(hwnd);
+        unsafe { InvalidateRect(hwnd, null(), 0) };
     }
 }
 
@@ -1026,6 +1206,11 @@ fn on_ncdestroy() {
     s.scroll = 0;
     s.press = -1;
     s.dragging = false;
+    s.view = View::Notes;
+    s.notes_scroll = 0;
+    s.settings_hover = settings::Hit::None;
+    drop(s);
+    settings::free_fonts();
 }
 
 /// Wndproc del EDIT del buscador (ver `on_create`).
@@ -1144,13 +1329,28 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_MOUSELEAVE => {
             set_hover(hwnd, -1, false);
+            if std::mem::replace(&mut state().lock().unwrap().settings_hover, settings::Hit::None) != settings::Hit::None {
+                InvalidateRect(hwnd, null(), 0);
+            }
             0
         }
         WM_SETCURSOR => {
-            if state().lock().unwrap().dragging {
+            let (dragging, over, on_btn) = {
+                let s = state().lock().unwrap();
+                (s.dragging, s.settings_hover, s.hover_top_btn)
+            };
+            if dragging {
                 return 1; // el cursor lo maneja on_mousemove
             }
+            if (over != settings::Hit::None || on_btn) && (lparam & 0xffff) as u32 == HTCLIENT {
+                SetCursor(LoadCursorW(null_mut(), IDC_HAND));
+                return 1;
+            }
             DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_KEYDOWN if wparam as u16 == VK_ESCAPE && view() == View::Settings => {
+            set_view(hwnd, View::Notes);
+            0
         }
         WM_LBUTTONDOWN => {
             on_lbuttondown(hwnd, x, y);
@@ -1171,11 +1371,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             if idx >= 0 {
                 set_sel(hwnd, idx);
                 open_selected();
-            } else {
-                let (cw, _) = client_size(hwnd);
-                if in_rect(&theme_btn_rect(cw), x, y) {
-                    theme::set_dark(!theme::is_dark());
-                }
+            } else if view() == View::Settings {
+                // El segundo clic de un doble clic también cuenta (un
+                // interruptor tocado dos veces vuelve a donde estaba).
+                settings_click(hwnd, x, y);
             }
             0
         }

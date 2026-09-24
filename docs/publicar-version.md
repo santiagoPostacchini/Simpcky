@@ -41,7 +41,7 @@ versión sin sincronización.
 
 4. En unos minutos aparece en la pestaña **Releases**, con las notas
    generadas a partir de los commits. Las copias instaladas se enteran
-   en el día (o al tocar "Buscar actualizaciones" en el menú).
+   en el día (o al tocar "Buscar ahora" en Configuración y sincronización).
 
 ## Armar el instalador en la compu
 

@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Dwm::*;
@@ -13,7 +14,7 @@ use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::Graphics::GdiPlus::*;
 use windows_sys::Win32::UI::Controls::{TOOLTIPS_CLASSW, TTF_SUBCLASS, TTM_ADDTOOLW, TTM_NEWTOOLRECTW, TTS_ALWAYSTIP, TTS_NOPREFIX, TTTOOLINFOW};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    DragDetect, GetFocus, GetKeyState, ReleaseCapture, SetFocus, VK_CONTROL, VK_F2, VK_MENU, VK_OEM_COMMA, VK_OEM_PERIOD, VK_OEM_PLUS,
+    DragDetect, GetCapture, GetFocus, GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_F2, VK_MENU, VK_OEM_COMMA, VK_OEM_PERIOD, VK_OEM_PLUS,
     VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
@@ -58,6 +59,8 @@ const ID_TOGGLE_TOP: u32 = 2109;
 /// Enrollado automático (prendido) o manual (apagado).
 const ID_TOGGLE_AUTOROLL: u32 = 2110;
 const ID_ALL_NOTES: u32 = 2111;
+/// Ocultar: la nota queda solo en "Todas las notas".
+const ID_HIDE: u32 = 2112;
 const TIMER_PEEK_END: usize = 4;
 
 /// (encabezado, cuerpo, tinta) del color de la nota en el tema actual
@@ -104,28 +107,37 @@ pub fn load_richedit_library() {
     }
 }
 
-/// Crea la ventana de una nota a partir de sus datos (nueva o cargada
-/// desde disco) y la registra en el estado global.
+/// Registra una nota en el estado global (nueva o cargada desde disco)
+/// y crea su ventana — salvo que esté guardada en "Todas las notas"
+/// (`hidden`): entonces devuelve nulo, y la ventana aparece recién al
+/// abrirla (`show_hidden`).
 pub fn create_note(data: NoteData) -> HWND {
-    let id = data.id;
-    let hinstance = {
+    {
         let mut a = app().lock().unwrap();
-        let hinstance = a.hinstance;
         a.notes.insert(
-            id,
+            data.id,
             crate::app::NoteRuntime {
                 data: data.clone(),
                 hwnd: 0,
                 edit: 0,
                 peeking: false,
                 deleting: false,
+                last_active: 0,
             },
         );
-        hinstance
-    };
+    }
+    if data.hidden {
+        return null_mut();
+    }
+    create_window(&data)
+}
 
+/// La ventana de una nota ya registrada.
+fn create_window(data: &NoteData) -> HWND {
+    let id = data.id;
+    let hinstance = { app().lock().unwrap().hinstance };
     let class_name = wide(NOTE_CLASS);
-    let header = flyout::px(flyout::dpi_at(data.x, data.y), HEADER_H);
+    let header = flyout::px(flyout::dpi_at(data.x, data.y) * scale_pct() / 100, HEADER_H);
     let h = if data.rolled { header } else { data.h };
     // Donde se dibuja, no donde "vive": una nota que viene de otra compu
     // (o de un monitor que ya no está) puede tener coordenadas fuera de
@@ -196,6 +208,15 @@ pub fn create_note(data: NoteData) -> HWND {
                 &border as *const u32 as *const c_void,
                 std::mem::size_of::<u32>() as u32,
             );
+            // Modo vidrio: el `WS_BORDER` de `WS_POPUPWINDOW` hizo falta
+            // para que el mod la reconociera al crearla, y ya aplicó su
+            // desenfoque; de acá en más solo dibujaría un marco gris de
+            // 1 px (el del vidrio extendido a toda la ventana).
+            let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+            if style & WS_BORDER != 0 {
+                SetWindowLongPtrW(hwnd, GWL_STYLE, (style & !WS_BORDER) as i32 as isize);
+                SetWindowPos(hwnd, null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            }
         }
     }
     hwnd
@@ -205,10 +226,60 @@ fn note_id(hwnd: HWND) -> u32 {
     unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as u32 }
 }
 
-/// `v` píxeles a 100 %, al ppp de la nota.
-fn px(hwnd: HWND, v: i32) -> i32 {
+/// Escala de las notas elegida en Configuración (100, 125 o 150 %).
+/// Aparte del estado global: se consulta en cada medida, también con
+/// ese estado tomado.
+static SCALE: AtomicI32 = AtomicI32::new(100);
+
+pub fn scale_pct() -> i32 {
+    SCALE.load(Ordering::Relaxed)
+}
+
+fn pct_of(level: u8) -> i32 {
+    match level {
+        1 => 125,
+        2 => 150,
+        _ => 100,
+    }
+}
+
+/// Al arrancar, con los ajustes ya cargados.
+pub fn load_scale() {
+    let level = app().lock().unwrap().settings.scale;
+    SCALE.store(pct_of(level), Ordering::Relaxed);
+}
+
+/// Otra escala: las notas se agrandan o se achican enteras (letra,
+/// encabezado y también la ventana, en proporción) y se rehacen.
+pub fn set_scale(level: u8) {
+    let (old, new) = (scale_pct(), pct_of(level));
+    app().lock().unwrap().settings.scale = level;
+    crate::app::save_settings();
+    if old == new {
+        return;
+    }
+    SCALE.store(new, Ordering::Relaxed);
+    flush_all();
+    {
+        let mut a = app().lock().unwrap();
+        for nr in a.notes.values_mut() {
+            nr.data.w = nr.data.w * new / old;
+            nr.data.h = nr.data.h * new / old;
+        }
+    }
+    save_all();
+    recreate_all();
+}
+
+/// El ppp con el que se dibuja la nota: el del monitor, por la escala.
+pub fn note_dpi(hwnd: HWND) -> i32 {
     let dpi = unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd) }.max(96) as i32;
-    v * dpi / 96
+    dpi * scale_pct() / 100
+}
+
+/// `v` píxeles a 100 %, al ppp y la escala de la nota.
+fn px(hwnd: HWND, v: i32) -> i32 {
+    v * note_dpi(hwnd) / 96
 }
 
 /// Alto del encabezado de esta nota (y de la nota entera, enrollada).
@@ -218,7 +289,7 @@ fn header_h(hwnd: HWND) -> i32 {
 
 /// El tamaño de una nota nueva, al ppp del monitor en (`x`, `y`).
 pub fn default_size(x: i32, y: i32) -> (i32, i32) {
-    let dpi = flyout::dpi_at(x, y);
+    let dpi = flyout::dpi_at(x, y) * scale_pct() / 100;
     (flyout::px(dpi, 280), flyout::px(dpi, 320))
 }
 
@@ -430,12 +501,16 @@ pub fn repaint_headers() {
     }
 }
 
+/// Lo que cambia con el mouse encima o el foco: el encabezado (botones)
+/// y la agarradera de la esquina.
 fn invalidate_header(hwnd: HWND) {
     let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
     unsafe {
         GetClientRect(hwnd, &mut rc);
         rc.bottom = header_h(hwnd);
         InvalidateRect(hwnd, &rc, 0);
+        let grip = grip_rect(hwnd);
+        InvalidateRect(hwnd, &grip, 0);
     }
 }
 
@@ -634,6 +709,9 @@ fn paint(hwnd: HWND, hdc: HDC) {
             paint_glass_header(hwnd, hdc, &layout, width, hh, header_color, ink, ha, (pinned, rolled, hot), &title, renaming);
             if client.bottom > hh {
                 crate::glass::fill(hdc, RECT { left: 0, top: hh, right: width, bottom: client.bottom }, body_color, ba);
+                if layout.buttons {
+                    paint_grip(hwnd, hdc, body_color, ink, Some(ba));
+                }
             }
             return;
         }
@@ -685,6 +763,9 @@ fn paint(hwnd: HWND, hdc: HDC) {
         // RichEdit tapa el resto; WS_CLIPCHILDREN evita pisarlo).
         if client.bottom > hh {
             fill_body(hdc, RECT { left: 0, top: hh, right: width, bottom: client.bottom }, body_color);
+            if layout.buttons {
+                paint_grip(hwnd, hdc, body_color, ink, None);
+            }
         }
         SelectObject(mem, old_bmp);
         DeleteObject(bmp);
@@ -784,28 +865,9 @@ fn set_roll_mode(hwnd: HWND, mode: RollMode) {
 // Menú "⋯" de la nota
 // -----------------------------------------------------------------
 
-/// Marca un ítem de menú nativo con la viñeta redonda de "opción
-/// elegida" en vez del tilde de "activado" (lo usa el menú de la
-/// bandeja). `MF_CHECKED` solo sabe dibujar el tilde; el círculo (que es
-/// lo que corresponde cuando las opciones son excluyentes) se pide con
-/// `MFT_RADIOCHECK`.
-pub fn mark_radio(menu: HMENU, id: u32, selected: bool) {
-    unsafe {
-        let mut mii: MENUITEMINFOW = std::mem::zeroed();
-        mii.cbSize = std::mem::size_of::<MENUITEMINFOW>() as u32;
-        mii.fMask = MIIM_FTYPE | MIIM_STATE;
-        mii.fType = MFT_RADIOCHECK;
-        mii.fState = if selected { MFS_CHECKED } else { MFS_UNCHECKED };
-        SetMenuItemInfoW(menu, id, 0, &mii);
-    }
-}
-
-/// El menú de la nota — el botón "⋯" o el clic derecho en la barra —,
-/// el único lugar donde se elige el color (antes había dos: el punto del
-/// encabezado y un submenú con los nombres de los colores). `below`: el
-/// botón del que cuelga, en coordenadas de pantalla; `None`, en el
-/// cursor.
-fn show_note_menu(hwnd: HWND, below: Option<RECT>) {
+/// El menú de la nota (el botón "⋯"), el único lugar donde se elige el
+/// color. `below`: el botón del que cuelga, en coordenadas de pantalla.
+fn show_note_menu(hwnd: HWND, below: RECT) {
     let id = note_id(hwnd);
     let (color, roll_mode, layer) = {
         let a = app().lock().unwrap();
@@ -821,19 +883,12 @@ fn show_note_menu(hwnd: HWND, below: Option<RECT>) {
         Entry::toggle(ID_TOGGLE_AUTOROLL, 0xE70E, "Enrollar al quitar el mouse", "", roll_mode == RollMode::Auto),
         Entry::item(ID_RENAME, 0xE8AC, "Cambiar nombre", "F2"),
         Entry::item(ID_DUPLICATE_NOTE, 0xE8C8, "Duplicar", ""),
+        Entry::item(ID_HIDE, 0xED1A, "Ocultar", "Ctrl+W"),
         Entry::item(ID_ALL_NOTES, 0xE70B, "Todas las notas", ""),
         Entry::Separator,
         Entry::item(ID_DELETE_NOTE, 0xE74D, "Eliminar nota", "").danger(),
     ];
-    let anchor = match below {
-        Some(r) => flyout::Anchor::Below(r),
-        None => {
-            let mut pt = POINT { x: 0, y: 0 };
-            unsafe { GetCursorPos(&mut pt) };
-            flyout::Anchor::Point(pt.x, pt.y)
-        }
-    };
-    flyout::show(hwnd, entries, anchor);
+    flyout::show(hwnd, entries, flyout::Anchor::Below(below));
 }
 
 /// "+" del encabezado: una nota nueva al lado de esta (a la derecha, o a
@@ -953,10 +1008,28 @@ fn switch_layer_window(hwnd: HWND, to_top: bool) {
             }
             SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
         } else {
+            // Si se la está usando, no se va de golpe al escritorio: se
+            // queda adelante, asomada, hasta que el foco pase a otra cosa
+            // (ver TIMER_PEEK_END). Si no, vuelve ya.
+            let active = GetForegroundWindow() == hwnd;
+            if active {
+                let id = note_id(hwnd);
+                if let Some(nr) = app().lock().unwrap().notes.get_mut(&id) {
+                    nr.peeking = true;
+                }
+            }
             SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-            anchor_widget(hwnd);
+            if !active {
+                anchor_widget(hwnd);
+            }
         }
+        let active = GetForegroundWindow() == hwnd;
         apply_taskbar_visibility(hwnd, if to_top { Layer::AlwaysOnTop } else { Layer::Desktop });
+        // Refrescar el botón de la barra de tareas oculta y muestra la
+        // ventana, y eso le saca el foco: se le devuelve.
+        if active && GetForegroundWindow() != hwnd {
+            SetForegroundWindow(hwnd);
+        }
         InvalidateRect(hwnd, null(), 1);
     }
 }
@@ -1091,10 +1164,7 @@ pub fn confirm_delete(hwnd: HWND) {
 /// "¿Eliminar esta nota?" con el cuadro de diálogo sobre `owner` (la
 /// propia nota, o "Todas las notas" si se borra desde ahí).
 pub fn delete_note_confirm(hwnd: HWND, owner: HWND) {
-    let msg = wide("¿Eliminar esta nota? Esta acción no se puede deshacer.");
-    let title = wide("Simpcky");
-    let res = unsafe { MessageBoxW(owner, msg.as_ptr(), title.as_ptr(), MB_YESNO | MB_ICONWARNING) };
-    if res == IDYES {
+    if ask_delete(owner) {
         // Marcar ANTES de destruir: on_destroy solo borra los datos de
         // una nota si el usuario lo pidió (ver `NoteRuntime::deleting`).
         let id = note_id(hwnd);
@@ -1102,6 +1172,101 @@ pub fn delete_note_confirm(hwnd: HWND, owner: HWND) {
             nr.deleting = true;
         }
         unsafe { DestroyWindow(hwnd) };
+    }
+}
+
+fn ask_delete(owner: HWND) -> bool {
+    let msg = wide("¿Eliminar esta nota? Esta acción no se puede deshacer.");
+    let title = wide("Simpcky");
+    unsafe { MessageBoxW(owner, msg.as_ptr(), title.as_ptr(), MB_YESNO | MB_ICONWARNING) == IDYES }
+}
+
+/// "Eliminar nota" desde "Todas las notas": con ventana o guardada.
+pub fn delete_by_id(id: u32, owner: HWND) {
+    let hwnd = app().lock().unwrap().notes.get(&id).map(|nr| nr.hwnd as HWND);
+    match hwnd {
+        Some(h) if !h.is_null() => delete_note_confirm(h, owner),
+        Some(_) if ask_delete(owner) => {
+            app().lock().unwrap().notes.remove(&id);
+            save_all();
+        }
+        _ => {}
+    }
+}
+
+// -----------------------------------------------------------------
+// Guardar en "Todas las notas" (ocultar) y volver a mostrar
+// -----------------------------------------------------------------
+
+/// "Ocultar" (menú, Ctrl+W o cerrar la ventana): la nota deja el
+/// escritorio y queda guardada en "Todas las notas", de donde vuelve con
+/// doble clic o arrastrándola afuera.
+pub fn hide_note(hwnd: HWND) {
+    let id = note_id(hwnd);
+    flyout::close();
+    crate::rename::finish(hwnd, true);
+    commit_text_and_save(hwnd);
+    {
+        let mut a = app().lock().unwrap();
+        let Some(nr) = a.notes.get_mut(&id) else { return };
+        nr.data.hidden = true;
+    }
+    // No se borra nada: on_destroy guarda el texto y los datos, y como
+    // está guardada no se la vuelve a crear (ver `recreate_lost`).
+    unsafe { DestroyWindow(hwnd) };
+    // La primera vez, dónde quedó.
+    static TOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !TOLD.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        crate::tray::notify_action(
+            "La nota quedó en \"Todas las notas\"",
+            "Para volver a verla en el escritorio, abrila con doble clic o arrastrala afuera.",
+            crate::allnotes::show,
+        );
+    }
+}
+
+/// "Ocultar" desde "Todas las notas".
+pub fn hide_by_id(id: u32) {
+    let hwnd = app().lock().unwrap().notes.get(&id).map(|nr| nr.hwnd as HWND).unwrap_or(null_mut());
+    if !hwnd.is_null() {
+        hide_note(hwnd);
+    }
+}
+
+/// La ventana de la nota `id`, creándola si estaba guardada (en su lugar
+/// de siempre, o en `at`). Nulo si la nota no existe o no se pudo.
+fn show_hidden(id: u32, at: Option<(i32, i32)>) -> HWND {
+    let data = {
+        let mut a = app().lock().unwrap();
+        let Some(nr) = a.notes.get_mut(&id) else { return null_mut() };
+        if nr.hwnd != 0 {
+            return nr.hwnd as HWND;
+        }
+        nr.data.hidden = false;
+        if let Some((x, y)) = at {
+            (nr.data.x, nr.data.y) = (x, y);
+        }
+        nr.data.clone()
+    };
+    let hwnd = create_window(&data);
+    save_all();
+    hwnd
+}
+
+/// "Abrir" desde "Todas las notas", esté o no en el escritorio.
+pub fn open_by_id(id: u32) -> HWND {
+    let hwnd = show_hidden(id, None);
+    if !hwnd.is_null() {
+        open_note(hwnd);
+    }
+    hwnd
+}
+
+/// Soltar una tarjeta de "Todas las notas" en el escritorio.
+pub fn drop_by_id(id: u32, x: i32, y: i32) {
+    let hwnd = show_hidden(id, Some((x, y)));
+    if !hwnd.is_null() {
+        drop_on_desktop(hwnd, x, y);
     }
 }
 
@@ -1264,6 +1429,8 @@ pub fn apply_theme_all() {
         if !edit.is_null() {
             apply_body_style(edit, color);
             crate::theme::apply_scrollbars(edit);
+            // En modo vidrio, la opacidad depende también del tema.
+            editor::set_glass(edit, crate::glass::opacity().map(|(_, b)| b));
         }
         unsafe { InvalidateRect(hwnd, null(), 1) };
     }
@@ -1276,10 +1443,10 @@ pub fn apply_theme_all() {
 pub fn recreate_lost() {
     let lost: Vec<NoteData> = {
         let a = app().lock().unwrap();
-        a.notes.values().filter(|nr| nr.hwnd == 0).map(|nr| nr.data.clone()).collect()
+        a.notes.values().filter(|nr| nr.hwnd == 0 && !nr.data.hidden).map(|nr| nr.data.clone()).collect()
     };
     for data in lost {
-        create_note(data);
+        create_window(&data);
     }
 }
 
@@ -1683,37 +1850,36 @@ fn on_dblclick(hwnd: HWND, lparam: LPARAM) {
     }
 }
 
-const RESIZE_MARGIN: i32 = 6;
+/// Franja de los bordes que cambia el tamaño (a 100 %), y cuánto de
+/// cada lado ocupa una esquina: las esquinas son redondeadas y chicas,
+/// así que se agarran también desde un poco más allá.
+const RESIZE_MARGIN: i32 = 8;
+const RESIZE_CORNER: i32 = 18;
 
-/// Deja que Windows redimensione la ventana como si tuviera un borde
-/// grueso normal (aunque no lo tenga: es un WS_POPUP sin marco), con
-/// solo decirle en qué borde/esquina cae el cursor. Deshabilitado
-/// mientras está enrollada (el alto queda fijo al del encabezado).
-fn on_nchittest(hwnd: HWND, lparam: LPARAM) -> LRESULT {
+/// Qué borde o esquina de la nota hay en (`x`, `y`) (pantalla), o 0. Lo
+/// usa también el texto (`editor.rs`), que llega hasta los costados y
+/// deja pasar ahí el mouse a la nota. Nada mientras está enrollada (el
+/// alto queda fijo al del encabezado).
+pub fn resize_hit(hwnd: HWND, x: i32, y: i32) -> u32 {
     let id = note_id(hwnd);
-    let rolled = {
-        let a = app().lock().unwrap();
-        a.notes.get(&id).map(|nr| nr.data.rolled).unwrap_or(false)
-    };
-    if rolled {
-        return unsafe { DefWindowProcW(hwnd, WM_NCHITTEST, 0, lparam) };
+    if app().lock().unwrap().notes.get(&id).is_none_or(|nr| nr.data.rolled) {
+        return 0;
     }
-    let x = (lparam & 0xffff) as i16 as i32;
-    let y = ((lparam >> 16) & 0xffff) as i16 as i32;
     let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
     unsafe { GetWindowRect(hwnd, &mut rc) };
-    let m = px(hwnd, RESIZE_MARGIN);
-    let left = x < rc.left + m;
-    let right = x >= rc.right - m;
-    let top = y < rc.top + m;
-    let bottom = y >= rc.bottom - m;
-    let hit = if top && left {
+    let (m, c) = (px(hwnd, RESIZE_MARGIN), px(hwnd, RESIZE_CORNER));
+    let near = |v: i32, edge: i32, reach: i32, inward: bool| if inward { v >= edge && v < edge + reach } else { v < edge && v >= edge - reach };
+    let (left, right) = (near(x, rc.left, m, true), near(x, rc.right, m, false));
+    let (top, bottom) = (near(y, rc.top, m, true), near(y, rc.bottom, m, false));
+    let (left_c, right_c) = (near(x, rc.left, c, true), near(x, rc.right, c, false));
+    let (top_c, bottom_c) = (near(y, rc.top, c, true), near(y, rc.bottom, c, false));
+    if (top && left_c) || (left && top_c) {
         HTTOPLEFT
-    } else if top && right {
+    } else if (top && right_c) || (right && top_c) {
         HTTOPRIGHT
-    } else if bottom && left {
+    } else if (bottom && left_c) || (left && bottom_c) {
         HTBOTTOMLEFT
-    } else if bottom && right {
+    } else if (bottom && right_c) || (right && bottom_c) || in_grip(hwnd, x, y) {
         HTBOTTOMRIGHT
     } else if left {
         HTLEFT
@@ -1725,12 +1891,171 @@ fn on_nchittest(hwnd: HWND, lparam: LPARAM) -> LRESULT {
         HTBOTTOM
     } else {
         0
-    };
-    if hit != 0 {
-        hit as LRESULT
-    } else {
-        unsafe { DefWindowProcW(hwnd, WM_NCHITTEST, 0, lparam) }
     }
+}
+
+/// Windows redimensiona la ventana como si tuviera un borde grueso (o lo
+/// hace `begin_sizing`), con solo decirle en qué borde o esquina cae el
+/// cursor.
+fn on_nchittest(hwnd: HWND, lparam: LPARAM) -> LRESULT {
+    let x = (lparam & 0xffff) as i16 as i32;
+    let y = ((lparam >> 16) & 0xffff) as i16 as i32;
+    match resize_hit(hwnd, x, y) {
+        0 => unsafe { DefWindowProcW(hwnd, WM_NCHITTEST, 0, lparam) },
+        hit => hit as LRESULT,
+    }
+}
+
+/// La agarradera de la esquina de abajo a la derecha (en coordenadas de
+/// la nota): tres puntitos en diagonal, a la vista con el mouse encima o
+/// el foco en la nota, como los botones del encabezado.
+fn grip_rect(hwnd: HWND) -> RECT {
+    let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    unsafe { GetClientRect(hwnd, &mut rc) };
+    let s = px(hwnd, 14);
+    RECT { left: rc.right - s, top: rc.bottom - s, right: rc.right, bottom: rc.bottom }
+}
+
+fn in_grip(hwnd: HWND, x: i32, y: i32) -> bool {
+    let mut p = POINT { x, y };
+    unsafe { ScreenToClient(hwnd, &mut p) };
+    let g = grip_rect(hwnd);
+    p.x >= g.left && p.x < g.right && p.y >= g.top && p.y < g.bottom
+}
+
+/// Dibuja la agarradera (sobre el cuerpo ya pintado). `glass`: la
+/// opacidad del cuerpo en modo vidrio.
+unsafe fn paint_grip(hwnd: HWND, hdc: HDC, body: u32, ink: u32, glass: Option<u8>) {
+    let g = grip_rect(hwnd);
+    let (w, h) = (g.right - g.left, g.bottom - g.top);
+    let (d, r) = (px(hwnd, 4) as f32, px(hwnd, 1).max(1) as f32 * 1.1);
+    // Tres puntitos de la esquina hacia adentro, lejos del redondeo.
+    let corner = (w as f32 - px(hwnd, 6) as f32, h as f32 - px(hwnd, 6) as f32);
+    let dots = [(0.0, 0.0), (-d, 0.0), (0.0, -d), (-2.0 * d, 0.0), (-d, -d), (0.0, -2.0 * d)];
+    let draw = |gr: *mut GpGraphics, color: u32| {
+        let mut brush: *mut GpSolidFill = null_mut();
+        GdipCreateSolidFill(color, &mut brush);
+        for (dx, dy) in dots {
+            GdipFillEllipse(gr, brush as *mut GpBrush, corner.0 + dx - r, corner.1 + dy - r, r * 2.0, r * 2.0);
+        }
+        GdipDeleteBrush(brush as *mut GpBrush);
+    };
+    match glass {
+        Some(alpha) => {
+            if let Some(c) = crate::glass::Canvas::new(w, h) {
+                c.fill(RECT { left: 0, top: 0, right: w, bottom: h }, body, alpha);
+                c.with_graphics(|gr| draw(gr, crate::glass::argb(ink, 0x99)));
+                c.blit(hdc, g.left, g.top);
+            }
+        }
+        None => {
+            let mut gr: *mut GpGraphics = null_mut();
+            if GdipCreateFromHDC(hdc, &mut gr) == Ok && !gr.is_null() {
+                GdipSetSmoothingMode(gr, SmoothingModeAntiAlias);
+                GdipTranslateWorldTransform(gr, g.left as f32, g.top as f32, MatrixOrderPrepend);
+                draw(gr, (colorref_to_argb(ink) & 0x00ff_ffff) | 0x9900_0000);
+                GdipDeleteGraphics(gr);
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------
+// Cambio de tamaño a mano
+// -----------------------------------------------------------------
+
+/// Windows solo cambia el tamaño desde el borde (lo que dice
+/// `on_nchittest`) a las ventanas hijas y a las que tienen marco grueso
+/// (`WS_THICKFRAME`), que se vería. Una nota de primer nivel (siempre
+/// encima, asomada, o cualquiera en modo vidrio) lo hace acá: se toma el
+/// mouse y se acompaña el borde hasta soltar.
+struct Sizing {
+    hwnd: HWND,
+    edge: u32,
+    start: POINT,
+    rect: RECT,
+}
+
+thread_local! {
+    static SIZING: RefCell<Option<Sizing>> = const { RefCell::new(None) };
+}
+
+/// Empieza a cambiar el tamaño desde `edge` (un `HTLEFT`…`HTBOTTOMRIGHT`).
+/// `false` si es una nota anclada: eso lo hace Windows.
+fn begin_sizing(hwnd: HWND, edge: u32) -> bool {
+    unsafe {
+        if GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & WS_CHILD != 0 {
+            return false;
+        }
+        let mut start = POINT { x: 0, y: 0 };
+        GetCursorPos(&mut start);
+        let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        GetWindowRect(hwnd, &mut rect);
+        SIZING.with(|s| *s.borrow_mut() = Some(Sizing { hwnd, edge, start, rect }));
+        SetCapture(hwnd);
+        SendMessageW(hwnd, WM_ENTERSIZEMOVE, 0, 0);
+    }
+    true
+}
+
+fn sizing_cursor(edge: u32) -> *const u16 {
+    match edge {
+        HTLEFT | HTRIGHT => IDC_SIZEWE,
+        HTTOP | HTBOTTOM => IDC_SIZENS,
+        HTTOPLEFT | HTBOTTOMRIGHT => IDC_SIZENWSE,
+        _ => IDC_SIZENESW,
+    }
+}
+
+/// El mouse se movió: si se está cambiando el tamaño, el borde lo sigue
+/// (sin achicarse de la medida mínima). `true` si era eso.
+fn on_sizing_move(hwnd: HWND) -> bool {
+    let Some((edge, start, r)) = SIZING.with(|s| s.borrow().as_ref().filter(|z| z.hwnd == hwnd).map(|z| (z.edge, z.start, z.rect))) else {
+        return false;
+    };
+    let mut p = POINT { x: 0, y: 0 };
+    unsafe { GetCursorPos(&mut p) };
+    let (dx, dy) = (p.x - start.x, p.y - start.y);
+    let (min_w, min_h) = (px(hwnd, 160), header_h(hwnd) + px(hwnd, 80));
+    let (mut left, mut top, mut right, mut bottom) = (r.left, r.top, r.right, r.bottom);
+    if matches!(edge, HTLEFT | HTTOPLEFT | HTBOTTOMLEFT) {
+        left = (r.left + dx).min(r.right - min_w);
+    }
+    if matches!(edge, HTRIGHT | HTTOPRIGHT | HTBOTTOMRIGHT) {
+        right = (r.right + dx).max(r.left + min_w);
+    }
+    if matches!(edge, HTTOP | HTTOPLEFT | HTTOPRIGHT) {
+        top = (r.top + dy).min(r.bottom - min_h);
+    }
+    if matches!(edge, HTBOTTOM | HTBOTTOMLEFT | HTBOTTOMRIGHT) {
+        bottom = (r.bottom + dy).max(r.top + min_h);
+    }
+    unsafe {
+        SetCursor(LoadCursorW(null_mut(), sizing_cursor(edge)));
+        SetWindowPos(hwnd, null_mut(), left, top, right - left, bottom - top, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    true
+}
+
+/// Se soltó el botón (o se perdió el mouse): termina y se guarda.
+fn end_sizing(hwnd: HWND) -> bool {
+    let was = SIZING.with(|s| {
+        let mut s = s.borrow_mut();
+        let mine = s.as_ref().is_some_and(|z| z.hwnd == hwnd);
+        if mine {
+            *s = None;
+        }
+        mine
+    });
+    if was {
+        unsafe {
+            if GetCapture() == hwnd {
+                ReleaseCapture();
+            }
+            SendMessageW(hwnd, WM_EXITSIZEMOVE, 0, 0);
+        }
+    }
+    was
 }
 
 /// Tamaño mínimo al redimensionar: que siempre quede lugar para el
@@ -1754,7 +2079,7 @@ fn on_lbuttondown(hwnd: HWND, lparam: LPARAM) {
                 ClientToScreen(hwnd, &mut r as *mut RECT as *mut POINT);
                 ClientToScreen(hwnd, (&mut r as *mut RECT as *mut POINT).add(1));
             }
-            show_note_menu(hwnd, Some(r));
+            show_note_menu(hwnd, r);
         }
         Hit::Pin => toggle_always_on_top(hwnd),
         Hit::Bar => on_bar_click(hwnd, x, y),
@@ -1821,6 +2146,7 @@ pub fn handle_shortcut(target: HWND, vk: u32, repeat: bool) -> bool {
         Roll,
         AlwaysOnTop,
         Desktop,
+        Hide,
         Style(usize),
         Bullets,
         Todos,
@@ -1844,6 +2170,7 @@ pub fn handle_shortcut(target: HWND, vk: u32, repeat: bool) -> bool {
             (b'R', false) => Some(Action::Roll),
             (b'T', true) => Some(Action::AlwaysOnTop),
             (b'D', true) => Some(Action::Desktop),
+            (b'W', false) => Some(Action::Hide),
             _ if !in_text || alt => None,
             (b'B', false) => Some(Action::Style(crate::richtext::BOLD)),
             (b'I', false) => Some(Action::Style(crate::richtext::ITALIC)),
@@ -1870,6 +2197,7 @@ pub fn handle_shortcut(target: HWND, vk: u32, repeat: bool) -> bool {
         Action::Roll => toggle_roll_manual(note),
         Action::AlwaysOnTop => toggle_always_on_top(note),
         Action::Desktop => set_layer(note, Layer::Desktop),
+        Action::Hide => hide_note(note),
         Action::Style(k) => editor::toggle_style(target, k),
         Action::Bullets => editor::toggle_bullets(target),
         Action::Todos => editor::toggle_todos(target),
@@ -1939,6 +2267,7 @@ fn on_command(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
             ID_DUPLICATE_NOTE => duplicate_note(hwnd),
             ID_RENAME => crate::rename::begin(hwnd),
             ID_ALL_NOTES => crate::allnotes::show(),
+            ID_HIDE => hide_note(hwnd),
             id if (ID_COLOR_BASE..ID_COLOR_BASE + crate::theme::PALETTE_LEN as u32).contains(&id) => {
                 set_color(hwnd, (id - ID_COLOR_BASE) as u8)
             }
@@ -2046,8 +2375,8 @@ pub unsafe extern "system" fn note_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM,
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
-        // Modo vidrio: el borde de `WS_POPUPWINDOW` no se dibuja, todo es
-        // área de la nota.
+        // Modo vidrio, mientras se crea: el borde de `WS_POPUPWINDOW` no
+        // se dibuja, todo es área de la nota (después se le saca).
         WM_NCCALCSIZE if wparam != 0 && GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & WS_BORDER != 0 => 0,
         // Modo vidrio: un widget se queda sobre el escritorio aunque lo
         // activen (si no, un clic lo pasaba adelante de las aplicaciones).
@@ -2071,8 +2400,14 @@ pub unsafe extern "system" fn note_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM,
             on_getminmaxinfo(hwnd, lparam);
             0
         }
-        WM_RBUTTONUP => {
-            show_note_menu(hwnd, None);
+        // El menú de la nota se abre solo con "⋯" (antes también con
+        // clic derecho en la barra: dos caminos para lo mismo).
+        WM_RBUTTONUP => 0,
+        WM_NCLBUTTONDOWN if (HTLEFT..=HTBOTTOMRIGHT).contains(&(wparam as u32)) && begin_sizing(hwnd, wparam as u32) => 0,
+        WM_MOUSEMOVE if on_sizing_move(hwnd) => 0,
+        WM_LBUTTONUP if end_sizing(hwnd) => 0,
+        WM_CAPTURECHANGED => {
+            end_sizing(hwnd);
             0
         }
         WM_MOUSEMOVE => {
@@ -2117,6 +2452,10 @@ pub unsafe extern "system" fn note_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM,
                 }
                 0
             } else {
+                let id = note_id(hwnd);
+                if let Some(nr) = app().lock().unwrap().notes.get_mut(&id) {
+                    nr.last_active = crate::persist::now_ms();
+                }
                 // Al activarse, el foco va al texto (DefWindowProc lo
                 // dejaría en la ventana de la nota, sin cursor).
                 if !crate::rename::is_renaming(hwnd) {
@@ -2138,8 +2477,10 @@ pub unsafe extern "system" fn note_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM,
             crate::rename::finish(hwnd, wparam != 0);
             0
         }
+        // Alt+F4, o "Cerrar ventana" en la barra de tareas (siempre
+        // encima): se guarda en "Todas las notas", no se borra.
         WM_CLOSE => {
-            confirm_delete(hwnd);
+            hide_note(hwnd);
             0
         }
         WM_DESTROY => {

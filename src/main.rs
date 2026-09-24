@@ -18,7 +18,9 @@ mod json;
 mod note;
 mod oauth;
 mod persist;
+mod picker;
 mod richtext;
+mod settings;
 mod rename;
 mod shell;
 mod sync;
@@ -102,6 +104,8 @@ fn main() {
         desktop_menu: true,
         auto_update: true,
         translucency: 2,
+        scale: 0,
+        hotkey: 2,
     });
     theme::init(settings.dark);
 
@@ -125,6 +129,8 @@ fn main() {
     tray::register_class(hinstance);
     allnotes::register_class(hinstance);
     welcome::register_class(hinstance);
+    picker::register_class(hinstance);
+    note::load_scale();
 
     // Modo vidrio (Windhawk): antes de crear las notas, que según esto son
     // de una clase de ventana u otra.

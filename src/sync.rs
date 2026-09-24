@@ -10,10 +10,12 @@
 //!
 //! **Reglas de la fusión** (ver `merge`):
 //! - Cada nota tiene una identidad global (`uid`), no el número local.
-//! - Cada nota tiene cuatro partes (contenido, color, posición/tamaño,
-//!   estado), cada una con su hora de modificación: gana la más nueva
-//!   **de cada parte**. Mover una nota en la notebook no pisa lo que se
-//!   escribió en ella en la de escritorio.
+//! - Se sincroniza lo que la nota *es*: su contenido (nombre y texto) y
+//!   su color, cada uno con su hora de modificación; gana el más nuevo
+//!   **de cada parte**. Dónde está y cómo se acomoda en el escritorio
+//!   (posición, tamaño, "siempre encima", enrollada, guardada) es de
+//!   cada compu y no viaja (ver `persist::SYNCED`): una nota que llega
+//!   nueva toma de allá solo su lugar inicial.
 //! - Borrar deja una lápida. Una nota con lápida más nueva que su
 //!   último cambio queda borrada; si se la editó *después* de borrarla
 //!   en otra compu, la edición gana y la nota vuelve.
@@ -33,7 +35,7 @@ use crate::app::app;
 use crate::drive::{self, DriveError};
 use crate::json;
 use crate::oauth::{self, AuthError};
-use crate::persist::{self, NoteData, Tomb, PARTS};
+use crate::persist::{self, NoteData, Tomb, SYNCED};
 use crate::win::wide;
 
 /// El hilo de red avisa que terminó (`lparam` = `Box<JobResult>`).
@@ -64,13 +66,14 @@ const FORMAT: u32 = 2;
 // Fusión (pura: sin ventanas ni red, cubierta por tests)
 // -----------------------------------------------------------------
 
-/// Dos versiones de la misma nota: de cada parte, la más nueva. Empate
-/// exacto (mismo milisegundo, valores distintos): gana el valor mayor,
-/// para que todas las compus elijan lo mismo.
+/// Dos versiones de la misma nota: de cada parte que se sincroniza, la
+/// más nueva; lo demás (lo de cada compu), el de `a`. Empate exacto
+/// (mismo milisegundo, valores distintos): gana el valor mayor, para que
+/// todas las compus elijan lo mismo.
 pub fn merge_note(a: &NoteData, b: &NoteData) -> NoteData {
     let mut out = a.clone();
     let (pa, pb) = (a.parts(), b.parts());
-    for part in 0..PARTS {
+    for part in SYNCED {
         if b.t[part] > a.t[part] || (b.t[part] == a.t[part] && pb[part] > pa[part]) {
             out.take_part(b, part);
         }
@@ -78,9 +81,12 @@ pub fn merge_note(a: &NoteData, b: &NoteData) -> NoteData {
     out
 }
 
-/// Fusiona dos conjuntos de notas y lápidas. El resultado no depende del
-/// orden de los argumentos (salvo los números locales, que se toman de
-/// `local`). Sale ordenado por `uid`.
+/// Fusiona dos conjuntos de notas y lápidas: el documento a subir. Lo
+/// que se sincroniza no depende del orden de los argumentos; el número
+/// local sale de `local`, y lo de cada compu (posición, estado) queda
+/// como estaba en `remote` — el documento no se reescribe porque acá se
+/// movió una nota, y las versiones viejas de Simpcky, que todavía lo
+/// leen, no ven moverse las suyas. Sale ordenado por `uid`.
 pub fn merge(local: &[NoteData], local_tombs: &[Tomb], remote: &[NoteData], remote_tombs: &[Tomb], now: u64) -> (Vec<NoteData>, Vec<Tomb>) {
     let mut tombs: HashMap<String, u64> = HashMap::new();
     for t in local_tombs.iter().chain(remote_tombs) {
@@ -94,7 +100,7 @@ pub fn merge(local: &[NoteData], local_tombs: &[Tomb], remote: &[NoteData], remo
     }
     for n in local {
         let merged = match notes.get(&n.uid) {
-            Some(r) => NoteData { id: n.id, ..merge_note(n, r) },
+            Some(r) => NoteData { id: n.id, hidden: n.hidden, ..merge_note(r, n) },
             None => n.clone(),
         };
         notes.insert(n.uid.clone(), merged);
@@ -371,7 +377,7 @@ pub fn on_done(lparam: isize) {
             disconnect_local();
             crate::tray::notify(
                 "Simpcky se desconectó de Google Drive",
-                "Google ya no acepta la conexión guardada. Volvé a conectarla desde el ícono de la bandeja.",
+                "Google ya no acepta la conexión guardada. Volvé a conectarla desde Configuración y sincronización (ícono de la bandeja).",
             );
         }
         Err(SyncError::Other(msg)) => {
@@ -588,7 +594,7 @@ fn message(text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persist::{Layer, RollMode, CONTENT, GEOM};
+    use crate::persist::{Layer, RollMode, COLOR, CONTENT, GEOM, PARTS, STATE};
 
     fn note(uid: &str, text: &str, t: u64) -> NoteData {
         let mut n = NoteData::new(1, 100, 100, 0, RollMode::Manual);
@@ -609,18 +615,48 @@ mod tests {
 
     #[test]
     fn newer_part_wins_independently() {
-        // Notebook: movió la nota (t=20). Escritorio: editó el texto (t=30).
+        // Notebook: le cambió el color (t=20). Escritorio: editó el texto (t=30).
         let mut laptop = note("a", "viejo", 10);
-        laptop.x = 999;
-        laptop.t[GEOM] = 20;
+        laptop.color = 4;
+        laptop.t[COLOR] = 20;
         let mut desktop = note("a", "nuevo", 10);
         desktop.t[CONTENT] = 30;
         let (n, _) = merge(&[laptop.clone()], &[], &[desktop.clone()], &[], NOW);
-        assert_eq!(n[0].text, "nuevo");
-        assert_eq!(n[0].x, 999);
+        assert_eq!((n[0].text.as_str(), n[0].color), ("nuevo", 4));
         // Y da lo mismo quién fusiona.
         let (m, _) = merge(&[desktop], &[], &[laptop], &[], NOW);
-        assert_eq!((m[0].text.as_str(), m[0].x), ("nuevo", 999));
+        assert_eq!((m[0].text.as_str(), m[0].color), ("nuevo", 4));
+    }
+
+    #[test]
+    fn position_and_state_stay_on_each_computer() {
+        // Acá se movió, se enrolló y se guardó la nota, más tarde que lo
+        // que hay en Drive.
+        let mut here = note("a", "A", 10);
+        (here.x, here.rolled, here.hidden) = (999, true, true);
+        here.t[GEOM] = 50;
+        here.t[STATE] = 50;
+        let there = note("a", "A", 10);
+        // Al aplicar: nada de lo de allá pisa lo de acá.
+        let applied = merge_note(&here, &there);
+        assert_eq!((applied.x, applied.rolled, applied.hidden), (999, true, true));
+        // Y el documento sigue con lo que tenía: moverla acá no es un
+        // cambio que suba.
+        let (doc, _) = merge(&[here], &[], &[there.clone()], &[], NOW);
+        assert_eq!((doc[0].x, doc[0].rolled, doc[0].t[GEOM]), (there.x, false, 10));
+        // Una nota nueva de otra compu sí llega con su lugar.
+        let mut new = note("b", "B", 10);
+        new.x = 1234;
+        let (doc, _) = merge(&[], &[], &[new], &[], NOW);
+        assert_eq!(doc[0].x, 1234);
+    }
+
+    #[test]
+    fn moving_does_not_revive_a_deleted_note() {
+        let mut moved = note("a", "A", 10);
+        moved.t[GEOM] = 60;
+        let (n, _) = merge(&[moved], &[], &[], &[Tomb { uid: "a".into(), at: 50 }], NOW);
+        assert!(n.is_empty());
     }
 
     #[test]

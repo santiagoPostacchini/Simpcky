@@ -63,25 +63,39 @@ pub fn active() -> bool {
 }
 
 /// Opacidad del color de la nota (encabezado, cuerpo) sobre el
-/// desenfoque, o `None` si las notas van lisas.
+/// desenfoque, o `None` si las notas van lisas. El encabezado, apenas
+/// más cubierto que el cuerpo: se distingue (también por su color) sin
+/// verse como una barra maciza.
 pub fn opacity() -> Option<(u8, u8)> {
     if !active() {
         return None;
     }
-    match crate::app::app().lock().unwrap().settings.translucency {
-        1 => Some((0x70, 0x30)), // suave
-        3 => Some((0xD0, 0xA0)), // fuerte
-        _ => Some((0xA0, 0x60)), // media
-    }
+    // El nivel es cuánta transparencia: "fuerte" es la que más deja ver.
+    // En claro, bastante más cubierto: la tinta es oscura, y sobre un
+    // fondo de pantalla claro (o el tinte oscuro del mod) casi sin color
+    // de nota encima no se leía.
+    let level = crate::app::app().lock().unwrap().settings.translucency;
+    Some(match (crate::theme::is_dark(), level) {
+        (true, 1) => (0xB8, 0xA0), // suave
+        (true, 3) => (0x50, 0x30), // fuerte
+        (true, _) => (0x80, 0x60), // media
+        (false, 1) => (0xE8, 0xE0),
+        (false, 3) => (0xC0, 0xB0),
+        (false, _) => (0xD4, 0xC8),
+    })
 }
 
 /// Opacidad del título de la nota en modo vidrio: como el resto, deja
-/// ver un poco el desenfoque (más cuanto más suave el nivel).
+/// ver un poco el desenfoque (más cuanto más suave el nivel), sin
+/// perder lectura.
 pub fn title_alpha() -> u8 {
+    if !crate::theme::is_dark() {
+        return 0xff; // tinta oscura sobre claro: entera
+    }
     match crate::app::app().lock().unwrap().settings.translucency {
-        1 => 0x99, // suave
-        3 => 0xDD, // fuerte
-        _ => 0xBB, // media
+        1 => 0xEE, // suave
+        3 => 0xC4, // fuerte
+        _ => 0xDA, // media
     }
 }
 

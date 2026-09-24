@@ -2,7 +2,8 @@
 //! una compu (todavía no hay `settings.json`). Reúne lo que conviene
 //! decidir de entrada — iniciar con Windows, el clic derecho del
 //! escritorio, el tema — y ofrece la sincronización con Google, que es
-//! opcional. Todo se puede cambiar después desde el menú de la bandeja.
+//! opcional. Todo se puede cambiar después en "Configuración y
+//! sincronización" (ver `settings.rs`), que usa estas mismas piezas.
 //!
 //! Dibujada a mano como "Todas las notas" (GDI+ con doble buffer), con
 //! los colores del tema actual.
@@ -186,11 +187,11 @@ fn hit_test(x: i32, y: i32) -> Hit {
 // Dibujo
 // -----------------------------------------------------------------
 
-fn argb(a: u8, c: u32) -> u32 {
+pub(crate) fn argb(a: u8, c: u32) -> u32 {
     (crate::note::colorref_to_argb(c) & 0x00ff_ffff) | ((a as u32) << 24)
 }
 
-unsafe fn round_rect(g: *mut GpGraphics, r: &RECT, radius: i32, color: u32) {
+pub(crate) unsafe fn round_rect(g: *mut GpGraphics, r: &RECT, radius: i32, color: u32) {
     let (x, y, w, h) = (r.left, r.top, r.right - r.left, r.bottom - r.top);
     let d = (radius * 2).min(w).min(h);
     let mut path: *mut GpPath = null_mut();
@@ -207,7 +208,7 @@ unsafe fn round_rect(g: *mut GpGraphics, r: &RECT, radius: i32, color: u32) {
     GdipDeletePath(path);
 }
 
-unsafe fn text(hdc: HDC, font: isize, color: u32, s: &str, mut rc: RECT, flags: u32) {
+pub(crate) unsafe fn text(hdc: HDC, font: isize, color: u32, s: &str, mut rc: RECT, flags: u32) {
     let old = SelectObject(hdc, font as HGDIOBJ);
     SetTextColor(hdc, color);
     let w = wide(s);
@@ -217,10 +218,10 @@ unsafe fn text(hdc: HDC, font: isize, color: u32, s: &str, mut rc: RECT, flags: 
 
 /// Ámbar del ícono: el color de "prendido" en los dos temas (con la
 /// perilla blanca encima se distingue bien de "apagado").
-const ON_COLOR: u32 = crate::win::rgb(0xF5, 0x9E, 0x0B);
+pub(crate) const ON_COLOR: u32 = crate::win::rgb(0xF5, 0x9E, 0x0B);
 
 /// Un interruptor (como el del diseño, en el menú de la nota).
-unsafe fn switch(g: *mut GpGraphics, right: i32, cy: i32, on: bool, off_color: u32) {
+pub(crate) unsafe fn switch(g: *mut GpGraphics, right: i32, cy: i32, on: bool, off_color: u32) {
     let track = RECT { left: right - 40, top: cy - 11, right, bottom: cy + 11 };
     round_rect(g, &track, 11, argb(0xff, if on { ON_COLOR } else { off_color }));
     let kx = if on { track.right - 20 } else { track.left + 2 };
@@ -360,7 +361,7 @@ fn on_paint(hwnd: HWND) {
 // Interacción
 // -----------------------------------------------------------------
 
-fn open_privacy() {
+pub(crate) fn open_privacy() {
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     let url = wide(concat!(env!("CARGO_PKG_HOMEPAGE"), "privacidad.html"));
     let verb = wide("open");

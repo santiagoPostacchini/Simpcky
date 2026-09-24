@@ -33,6 +33,9 @@ pub struct NoteRuntime {
     /// destrucción (Explorer reiniciándose, cierre de sesión) los
     /// conserva.
     pub deleting: bool,
+    /// Cuándo se usó por última vez (ms), para ordenar el selector de
+    /// notas (`picker.rs`): la más reciente primero. No se guarda.
+    pub last_active: u64,
 }
 
 pub struct AppState {

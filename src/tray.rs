@@ -67,23 +67,49 @@ const TIMER_SAVE_RETRY: usize = 40;
 const SAVE_RETRY_MS: u32 = 30_000;
 
 const ID_NEW_NOTE: u32 = 1000;
-const ID_ROLL_DEFAULT_MANUAL: u32 = 1001;
-const ID_ROLL_DEFAULT_AUTO: u32 = 1002;
-const ID_AUTOSTART: u32 = 1003;
 const ID_EXIT: u32 = 1004;
 pub const ID_ALL_NOTES: u32 = 1005;
-const ID_DARK_MODE: u32 = 1006;
-const ID_DESKTOP_MENU: u32 = 1007;
-const ID_SYNC_CONNECT: u32 = 1010;
-const ID_SYNC_NOW: u32 = 1011;
-const ID_SYNC_DISCONNECT: u32 = 1012;
-const ID_SYNC_CANCEL: u32 = 1013;
+/// "Configuración y sincronización…" (la pestaña de "Todas las notas").
+const ID_SETTINGS: u32 = 1008;
 const ID_UPDATE_INSTALL: u32 = 1020;
-const ID_UPDATE_CHECK: u32 = 1021;
-const ID_UPDATE_AUTO: u32 = 1022;
 const ID_SAVE_RETRY: u32 = 1030;
-/// "Transparencia con Windhawk": + 0 (apagada) … 3 (fuerte).
-const ID_TRANSLUCENCY: u32 = 1040;
+
+/// El atajo global del selector de notas (ver `picker.rs`).
+const HOTKEY_PICKER: i32 = 1;
+/// No se pudo registrar el atajo elegido (lo usa otra aplicación).
+static HOTKEY_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Registra el atajo elegido en Configuración (o ninguno).
+pub fn apply_hotkey() {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT};
+    let (hwnd, choice) = {
+        let a = app().lock().unwrap();
+        (a.controller_hwnd as HWND, a.settings.hotkey)
+    };
+    if hwnd.is_null() {
+        return;
+    }
+    unsafe { UnregisterHotKey(hwnd, HOTKEY_PICKER) };
+    // Nada con la tecla Windows: Windows y Office ya usan casi todas
+    // (Win+Mayús+N abre OneNote).
+    let keys = match choice {
+        2 => Some((MOD_CONTROL | MOD_ALT, b'N' as u32)),
+        3 => Some((MOD_CONTROL | MOD_ALT, 0x20)), // VK_SPACE
+        _ => None,
+    };
+    let ok = keys.is_none_or(|(mods, vk)| unsafe { RegisterHotKey(hwnd, HOTKEY_PICKER, mods | MOD_NOREPEAT, vk) } != 0);
+    HOTKEY_FAILED.store(!ok, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn hotkey_failed() -> bool {
+    HOTKEY_FAILED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_hotkey(choice: u8) {
+    app().lock().unwrap().settings.hotkey = choice;
+    save_settings();
+    apply_hotkey();
+}
 
 fn taskbar_created_msg() -> u32 {
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -148,6 +174,7 @@ pub fn init(hinstance: HINSTANCE) -> HWND {
         unsafe { ChangeWindowMessageFilterEx(hwnd, taskbar_created_msg(), MSGFLT_ALLOW, null_mut()) };
         add_tray_icon(hwnd);
         app().lock().unwrap().controller_hwnd = hwnd as isize;
+        apply_hotkey();
     }
     hwnd
 }
@@ -323,30 +350,11 @@ pub fn spawn_note_near_cursor(x: i32, y: i32) {
 // Menú
 // -----------------------------------------------------------------
 
-fn append_check(menu: HMENU, id: u32, label: &str, checked: bool) {
-    let w = wide(label);
-    unsafe {
-        AppendMenuW(
-            menu,
-            MF_STRING | if checked { MF_CHECKED } else { MF_UNCHECKED },
-            id as usize,
-            w.as_ptr(),
-        );
-    }
-}
-
+/// El menú de la bandeja: lo de todos los días. Las preferencias y la
+/// cuenta de Google están en "Configuración y sincronización" (ver
+/// `settings.rs`).
 fn show_tray_menu(hwnd: HWND) {
-    let (manual, desktop_menu) = {
-        let a = app().lock().unwrap();
-        (a.settings.default_roll_mode == RollMode::Manual, a.settings.desktop_menu)
-    };
-    let autostart_on = shell::is_autostart_enabled();
-
     unsafe {
-        // Mismo orden y agrupación que la pantalla "Menús y bandeja"
-        // del diseño: nueva nota (con su atajo), el grupo de enrollado
-        // por defecto bajo su encabezado, todas las notas, y al final
-        // las preferencias y salir.
         let menu = CreatePopupMenu();
 
         // Si no se puede guardar, es lo primero que tiene que verse.
@@ -368,51 +376,11 @@ fn show_tray_menu(hwnd: HWND) {
 
         let new_note = wide("Nueva nota\tCtrl+N");
         AppendMenuW(menu, MF_STRING, ID_NEW_NOTE as usize, new_note.as_ptr());
-        AppendMenuW(menu, MF_SEPARATOR, 0, null());
-
-        // Encabezado de sección: un ítem deshabilitado, que es como se
-        // escribe un título de grupo en un menú nativo.
-        let roll_header = wide("Enrollar notas nuevas");
-        AppendMenuW(menu, MF_STRING | MF_DISABLED | MF_GRAYED, 0, roll_header.as_ptr());
-        let manual_label = wide("Manual (predeterminado)");
-        let auto_label = wide("Auto");
-        AppendMenuW(menu, MF_STRING, ID_ROLL_DEFAULT_MANUAL as usize, manual_label.as_ptr());
-        AppendMenuW(menu, MF_STRING, ID_ROLL_DEFAULT_AUTO as usize, auto_label.as_ptr());
-        note::mark_radio(menu, ID_ROLL_DEFAULT_MANUAL, manual);
-        note::mark_radio(menu, ID_ROLL_DEFAULT_AUTO, !manual);
-        AppendMenuW(menu, MF_SEPARATOR, 0, null());
-
         let all_notes = wide("Todas las notas");
         AppendMenuW(menu, MF_STRING, ID_ALL_NOTES as usize, all_notes.as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
-
-        append_sync_section(menu);
-        AppendMenuW(menu, MF_SEPARATOR, 0, null());
-
-        append_check(menu, ID_DARK_MODE, "Modo oscuro", crate::theme::is_dark());
-        let level = app().lock().unwrap().settings.translucency;
-        let sub = CreatePopupMenu();
-        for (i, name) in ["Apagada", "Suave", "Media", "Fuerte"].iter().enumerate() {
-            let label = wide(name);
-            AppendMenuW(sub, MF_STRING, (ID_TRANSLUCENCY + i as u32) as usize, label.as_ptr());
-            note::mark_radio(sub, ID_TRANSLUCENCY + i as u32, level as usize == i);
-        }
-        if !crate::glass::mod_loaded() {
-            AppendMenuW(sub, MF_SEPARATOR, 0, null());
-            let hint = wide("Se ve con el mod \"Translucent Windows\" de Windhawk (no está activo)");
-            AppendMenuW(sub, MF_STRING | MF_DISABLED | MF_GRAYED, 0, hint.as_ptr());
-        }
-        let sub_label = wide("Transparencia con Windhawk");
-        AppendMenuW(menu, MF_POPUP, sub as usize, sub_label.as_ptr());
-        append_check(menu, ID_DESKTOP_MENU, "\"Nueva nota\" en el clic derecho del escritorio", desktop_menu);
-        append_check(menu, ID_AUTOSTART, "Iniciar con Windows", autostart_on);
-        AppendMenuW(menu, MF_SEPARATOR, 0, null());
-
-        let about = wide(&format!("Simpcky {}", crate::update::version_text(crate::update::current())));
-        AppendMenuW(menu, MF_STRING | MF_DISABLED | MF_GRAYED, 0, about.as_ptr());
-        let check = wide("Buscar actualizaciones");
-        AppendMenuW(menu, MF_STRING, ID_UPDATE_CHECK as usize, check.as_ptr());
-        append_check(menu, ID_UPDATE_AUTO, "Buscar actualizaciones automáticamente", crate::update::is_auto());
+        let settings = wide("Configuración y sincronización…");
+        AppendMenuW(menu, MF_STRING, ID_SETTINGS as usize, settings.as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
 
         let exit_label = wide("Salir");
@@ -427,37 +395,20 @@ fn show_tray_menu(hwnd: HWND) {
     }
 }
 
-/// La sección de sincronización del menú: qué cuenta está conectada y
-/// cómo anda, o cómo conectarse. Es opcional: sin cuenta, un solo ítem.
-unsafe fn append_sync_section(menu: HMENU) {
-    let info = |text: &str| {
-        let w = wide(text);
-        AppendMenuW(menu, MF_STRING | MF_DISABLED | MF_GRAYED, 0, w.as_ptr());
-    };
-    let item = |id: u32, text: &str| {
-        let w = wide(text);
-        AppendMenuW(menu, MF_STRING, id as usize, w.as_ptr());
-    };
-    info("Sincronización con Google Drive");
-    if !crate::sync::is_configured() {
-        info("No disponible en esta compilación");
-    } else if crate::sync::is_connected() {
-        let (email, status) = crate::sync::status();
-        info(&format!("Cuenta: {email}"));
-        info(&status);
-        item(ID_SYNC_NOW, "Sincronizar ahora");
-        item(ID_SYNC_DISCONNECT, "Desconectar…");
-    } else if crate::sync::is_signing_in() {
-        info("Esperando al navegador…");
-        item(ID_SYNC_CANCEL, "Cancelar la conexión");
-    } else {
-        item(ID_SYNC_CONNECT, "Conectar con mi cuenta de Google…");
-    }
-}
-
-fn set_default_roll_mode(mode: RollMode) {
+pub fn set_default_roll_mode(mode: RollMode) {
     app().lock().unwrap().settings.default_roll_mode = mode;
     save_settings();
+}
+
+/// Transparencia con Windhawk: 0 (apagada) … 3 (fuerte).
+pub fn set_translucency(level: u8) {
+    app().lock().unwrap().settings.translucency = level.min(3);
+    crate::app::save_settings();
+    if crate::glass::update() {
+        note::recreate_all();
+    } else {
+        note::refresh_glass();
+    }
 }
 
 pub fn toggle_desktop_menu() {
@@ -495,29 +446,10 @@ fn handle_command(hwnd: HWND, id: u32) {
     match id {
         ID_NEW_NOTE => spawn_new_note(),
         ID_ALL_NOTES => crate::allnotes::show(),
-        ID_ROLL_DEFAULT_MANUAL => set_default_roll_mode(RollMode::Manual),
-        ID_ROLL_DEFAULT_AUTO => set_default_roll_mode(RollMode::Auto),
-        ID_DARK_MODE => crate::theme::set_dark(!crate::theme::is_dark()),
-        ID_DESKTOP_MENU => toggle_desktop_menu(),
-        ID_AUTOSTART => shell::set_autostart(!shell::is_autostart_enabled()),
+        ID_SETTINGS => crate::allnotes::show_settings(),
         ID_EXIT => exit_app(hwnd),
-        ID_SYNC_CONNECT => crate::sync::begin_sign_in(),
-        ID_SYNC_NOW => crate::sync::sync_now(),
-        ID_SYNC_DISCONNECT => crate::sync::disconnect(),
-        ID_SYNC_CANCEL => crate::sync::cancel_sign_in(),
         ID_UPDATE_INSTALL => crate::update::install(),
-        ID_UPDATE_CHECK => crate::update::check_now(),
-        ID_UPDATE_AUTO => crate::update::toggle_auto(),
         ID_SAVE_RETRY => crate::app::save_all(),
-        id if (ID_TRANSLUCENCY..ID_TRANSLUCENCY + 4).contains(&id) => {
-            app().lock().unwrap().settings.translucency = (id - ID_TRANSLUCENCY) as u8;
-            crate::app::save_settings();
-            if crate::glass::update() {
-                note::recreate_all();
-            } else {
-                note::refresh_glass();
-            }
-        }
         _ => {}
     }
 }
@@ -587,6 +519,12 @@ unsafe extern "system" fn controller_wndproc(hwnd: HWND, msg: u32, wparam: WPARA
         }
         WM_TIMER if wparam == crate::sync::TIMER_SYNC_SOON || wparam == crate::sync::TIMER_SYNC_POLL => {
             crate::sync::on_timer(wparam);
+            0
+        }
+        WM_HOTKEY => {
+            if wparam as i32 == HOTKEY_PICKER {
+                crate::picker::toggle();
+            }
             0
         }
         WM_APP_GLASS_CHECK => {

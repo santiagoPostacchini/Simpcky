@@ -317,7 +317,7 @@ fn respond(stream: &mut TcpStream, ok: bool) {
     let (title, text) = if ok {
         ("Listo", "Simpcky quedó conectado con tu cuenta de Google. Ya podés cerrar esta pestaña y volver a tus notas.")
     } else {
-        ("No se pudo conectar", "Simpcky no quedó conectado. Podés cerrar esta pestaña y volver a intentarlo desde el ícono de la bandeja.")
+        ("No se pudo conectar", "Simpcky no quedó conectado. Podés cerrar esta pestaña y volver a intentarlo desde Configuración y sincronización (ícono de la bandeja).")
     };
     let html = format!(
         "<!doctype html><html lang=\"es\"><head><meta charset=\"utf-8\"><title>Simpcky — {title}</title>\

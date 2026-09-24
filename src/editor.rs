@@ -445,7 +445,7 @@ fn base_format(edit: HWND, range: Option<(usize, usize)>, ink: u32) {
     );
     let face = wide("Segoe UI");
     cf.face[..face.len()].copy_from_slice(&face);
-    cf.height = 240; // 12 pt: los 16 px de siempre
+    cf.height = 240 * crate::note::scale_pct() / 100; // 12 pt (16 px) a 100 %
     cf.color = ink;
     match range {
         Some((a, b)) => {
@@ -1063,10 +1063,10 @@ fn open_emoji_panel(edit: HWND) {
 // Dibujo encima del RichEdit: emojis en color y casillas
 // -----------------------------------------------------------------
 
-/// Tamaño de letra del texto, en píxeles (los 12 pt de `base_format`).
+/// Tamaño de letra del texto, en píxeles (los 12 pt de `base_format`,
+/// con la escala de las notas).
 fn em_px(edit: HWND) -> i32 {
-    let dpi = unsafe { GetDpiForWindow(edit) }.max(96) as i32;
-    (240 * dpi / 1440).max(8)
+    (240 * crate::note::note_dpi(edit) / 1440).max(8)
 }
 
 /// Dónde termina la línea que empieza (o contiene) `cp` y arranca en `top`.
@@ -1106,8 +1106,9 @@ pub fn hidden_bar_width(hwnd: HWND) -> i32 {
     }
 }
 
+/// `v` píxeles a 100 %, al ppp y la escala de la nota.
 fn scale(edit: HWND, v: i32) -> i32 {
-    v * unsafe { GetDpiForWindow(edit) }.max(96) as i32 / 96
+    v * crate::note::note_dpi(edit) / 96
 }
 
 /// La franja de la barra (a la derecha, dentro del margen del texto), el
@@ -1528,12 +1529,8 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
         WM_NCHITTEST => {
             let r = DefSubclassProc(edit, msg, wparam, lparam);
             if r as u32 == HTCLIENT {
-                let mut p = POINT { x: (lparam & 0xffff) as i16 as i32, y: ((lparam >> 16) & 0xffff) as i16 as i32 };
-                ScreenToClient(edit, &mut p);
-                let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-                GetClientRect(edit, &mut rc);
-                let edge = scale(edit, 4);
-                if p.x < edge || p.x >= rc.right - edge {
+                let (x, y) = ((lparam & 0xffff) as i16 as i32, ((lparam >> 16) & 0xffff) as i16 as i32);
+                if crate::note::resize_hit(GetParent(edit), x, y) != 0 {
                     return HTTRANSPARENT as LRESULT;
                 }
             }

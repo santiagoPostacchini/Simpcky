@@ -38,8 +38,8 @@ Ya funciona:
 - **Enrollado con el switch pedido**: toda nota nace en modo **Manual**
   (nunca se enrolla sola). Desde el menú "⋯" de cada nota se puede pasar
   a **Auto** (se enrolla al quitar el mouse, se despliega al pasar por
-  encima). El valor por defecto para notas nuevas se cambia desde el
-  menú de la bandeja.
+  encima). El valor por defecto para notas nuevas se cambia en
+  Configuración y sincronización.
 - Cada nota es, por defecto, un **widget de escritorio**: anclada
   dentro de la ventana que contiene los íconos del escritorio, hija de
   verdad (`WS_CHILD`, no un `WS_POPUP` "poseído" — si no, se esconde
@@ -91,8 +91,12 @@ Ya funciona:
   color de la nota premultiplicado en un DIB de 32 bits, porque GDI
   escribe alfa 0 y el compositor mostraría ese color aclarado. Los íconos
   van con una máscara propia; el texto del RichEdit lo recompone el mod.
-  Intensidad en la bandeja → Transparencia con Windhawk. Sin el mod, las
-  notas vuelven solas a ancladas y lisas.
+  Intensidad en Configuración y sincronización → Transparencia
+  (requiere Windhawk): suave, media o fuerte (la más transparente). En
+  modo claro el color de la nota cubre bastante más (la tinta es
+  oscura: sobre un fondo claro casi transparente no se leía). Sin el mod, las notas vuelven solas a ancladas y lisas. El
+  `WS_BORDER` que el mod necesita para reconocerlas se les saca apenas
+  se crean (si no, el vidrio lleva un marco gris de 1 px).
 - **Barra de desplazamiento fina**, del color de la nota: la de Windows
   queda recortada fuera de la vista y se dibuja una rayita que se
   ensancha con el mouse y se arrastra.
@@ -108,13 +112,38 @@ Ya funciona:
   vacío vuelve al nombre automático.
 - **Redimensionable** desde cualquier borde o esquina (vía
   `WM_NCHITTEST`, sin necesidad de `WS_THICKFRAME`), con un tamaño
-  mínimo razonable. Deshabilitado mientras está enrollada.
+  mínimo razonable. Deshabilitado mientras está enrollada. Windows solo
+  hace ese cambio de tamaño en ventanas hijas (las ancladas) o con marco
+  grueso, así que las de primer nivel (siempre encima, asomadas, o
+  cualquiera en modo vidrio) lo hacen a mano: se toma el mouse y el
+  borde lo sigue hasta soltar. Los bordes agarran 8 px y las esquinas
+  18 px de cada lado (el texto le deja pasar el mouse a la nota ahí),
+  y con el mouse encima aparece una agarradera de tres puntitos abajo a
+  la derecha.
+- **Sacarle el "siempre encima"** a la nota que se está usando no la
+  manda al escritorio de golpe: se queda adelante, asomada, hasta que
+  el foco pase a otra cosa.
+- **Escala de las notas** (100, 125 o 150 %, en Configuración): letra,
+  encabezado, márgenes y la ventana entera, en proporción, sobre el
+  ppp del monitor.
+- **Traer una nota al frente con un atajo** (`picker.rs`): Ctrl+Alt+N
+  (o Ctrl+Alt+Espacio, o ninguno, en Configuración) muestra la lista de notas,
+  la última usada primero; se escribe para filtrar, flechas y Enter (o
+  clic), y la elegida se asoma adelante sin quedar "siempre encima".
+  También trae las ocultas.
 - **Ícono propio**, simple: un cuadrado amarillo redondeado con la
   franja del encabezado arriba (`assets/simpcky.ico`, 16 a 256 px).
   `build.rs` lo embebe en el `.exe` (arma el `.res` a mano, sin
   `rc.exe` ni dependencias), así que el mismo ícono se ve en el
   Explorador, la bandeja, Alt+Tab y el clic derecho del escritorio.
 - Eliminar nota (con confirmación).
+- **Ocultar una nota** ("⋯" → Ocultar, `Ctrl+W`, o cerrarla con
+  Alt+F4): deja el escritorio y queda guardada en "Todas las notas", con
+  la tarjeta apagada y el ojo tachado. Vuelve con doble clic o
+  arrastrándola afuera. Cerrar una nota ya no la borra.
+- **El menú de la nota** se abre solo con "⋯" (antes también con clic
+  derecho en la barra). El clic derecho en el texto sigue siendo el del
+  formato.
 - **Duplicar nota** desde el menú "⋯": copia texto, color, modo y
   tamaño en una nota nueva, corrida un poco.
 - **Ventana "Todas las notas"** (menú de la bandeja): buscador y
@@ -125,8 +154,17 @@ Ya funciona:
   bajas, las de "siempre encima" llevan el pin en la esquina, y el
   buscador filtra por nombre **y** por cuerpo. Doble clic (o Enter)
   abre la nota: se **asoma al frente** con el cursor en el texto (ver
-  abajo). Clic derecho en una tarjeta: abrir, cambiar nombre,
-  eliminar. Flechas para moverse, Esc para cerrar.
+  abajo). Clic derecho en una tarjeta: abrir, ocultar, cambiar nombre,
+  eliminar. Flechas para moverse, Esc para cerrar. Con el mod de
+  Windhawk la ventana es de vidrio: la píldora del buscador se compone
+  igual que el cuadro de texto que tiene adentro (alfa 0, como GDI),
+  así no se ve un rectángulo de otro tono.
+- **Configuración y sincronización**: la otra pestaña de "Todas las
+  notas" (el engranaje, o el menú de la bandeja; `settings.rs`). La
+  cuenta de Google, el enrollado de las notas nuevas, el tema, la
+  transparencia con Windhawk, iniciar con Windows, el clic derecho del
+  escritorio y las actualizaciones. El menú de la bandeja quedó en lo
+  de todos los días: nueva nota, todas las notas, configuración, salir.
 - **Arrastrar una tarjeta** de "Todas las notas" y soltarla afuera de
   la ventana: la nota queda ahí como widget de escritorio. Mientras se
   arrastra la sigue una mini nota semitransparente (`ghost.rs`); si
@@ -139,8 +177,7 @@ Ya funciona:
   nacía anclada al escritorio — detrás de todas las ventanas abiertas —
   y parecía que "Nueva nota" no hacía nada (se creaba igual; solo no
   se veía).
-- **Modo oscuro / claro**: "Modo oscuro" en el menú de la bandeja o en
-  el "⋯" de cualquier nota, o el botón sol/luna de "Todas las notas".
+- **Modo oscuro / claro**: en Configuración y sincronización.
   Cambia la paleta de todas las notas (en oscuro el color vive en el
   encabezado y el cuerpo es casi negro), la ventana "Todas las
   notas", su barra de título, las barras de desplazamiento y los menús
@@ -152,7 +189,7 @@ Ya funciona:
   está el cursor. En el menú compacto de Windows 11 queda dentro de
   **"Mostrar más opciones"** (o directo con Mayús + clic derecho):
   el menú nuevo solo acepta entradas de apps empaquetadas como MSIX.
-  Se puede apagar desde el menú de la bandeja.
+  Se puede apagar desde Configuración y sincronización.
 - **Una sola instancia**: abrir el `.exe` con la app ya corriendo le
   pasa el pedido a la que está abierta (una nota nueva con `--new`, o
   "Todas las notas" a secas) en vez de cargar todas las notas dos
@@ -164,24 +201,26 @@ Ya funciona:
 - **Atajos de teclado** (sección 7 de la especificación), mientras el
   foco esté en una nota: `Ctrl+N` nueva nota, `Ctrl+R` enrollar /
   desenrollar, `Ctrl+Shift+T` siempre encima, `Ctrl+Shift+D` anclar al
-  escritorio, `F2` cambiar nombre (`Ctrl+N` también en "Todas las
-  notas"). Se resuelven en el bucle de mensajes (`main.rs`), antes
+  escritorio, `F2` cambiar nombre, `Ctrl+W` ocultar (`Ctrl+N` también
+  en "Todas las notas"). Se resuelven en el bucle de mensajes (`main.rs`), antes
   de que el RichEdit se quede con la tecla. A propósito **no** son
   *hotkeys* globales: registrar Ctrl+N a nivel sistema se lo robaría a
   todas las demás apps de Windows.
 - Icono en la bandeja: clic izquierdo crea una nota, clic derecho abre
-  el menú (nueva nota, modo de enrollado por defecto, todas las notas,
-  modo oscuro, clic derecho del escritorio, iniciar con Windows,
-  salir), en el mismo orden que el diseño.
+  el menú (nueva nota, todas las notas, configuración y
+  sincronización, salir).
 - "Iniciar con Windows" real, vía `HKCU\...\Run`.
 - **Sincronización con Google Drive (opcional)**: las mismas notas en
   todas tus compus, en una carpeta oculta de tu Drive que solo ve
-  Simpcky. Se conecta desde el menú de la bandeja; la guía para crear el
+  Simpcky. Se conecta desde Configuración y sincronización; la guía para crear el
   cliente de Google (una sola vez) está en
   [`docs/sincronizacion-google.md`](docs/sincronizacion-google.md).
-  La fusión es por partes de cada nota (contenido, color, posición,
-  estado), con lápidas para lo borrado: lo que se escribe en una compu
-  nunca se pierde por algo que pasó en otra. Todo con lo que trae
+  Viajan el contenido (nombre, texto y formato) y el color, cada parte
+  con su hora, con lápidas para lo borrado: lo que se escribe en una
+  compu nunca se pierde por algo que pasó en otra. Dónde está cada nota
+  en el escritorio (posición, tamaño, siempre encima, enrollada,
+  oculta) es de cada compu: una nota nueva que llega de otra toma de
+  allá solo su lugar inicial. Todo con lo que trae
   Windows (WinHTTP, CNG, DPAPI), sin bibliotecas nuevas. Cubierto por
   tests (`cargo test`; los que usan la red real, con
   `cargo test -- --ignored`), y probado de punta a punta con una cuenta
@@ -218,10 +257,6 @@ Diferencias que quedan contra el lienzo de diseño:
   la derecha, badge 4): a propósito no está. El cuerpo entero es el
   RichEdit, así que no hay dónde dibujarla sin taparle texto, y el pin
   del encabezado ya dice en qué capa está la nota.
-- **"Ajustes"** en el menú de la bandeja: no hay ventana de ajustes
-  porque todo lo configurable (modo de enrollado por defecto, iniciar
-  con Windows) ya vive en ese mismo menú. Mejor eso que un ítem que no
-  lleva a ninguna parte.
 - **`Supr` para eliminar la nota**: tampoco, y a propósito. El foco
   normal de una nota es su cuadro de texto, donde `Supr` tiene que
   borrar caracteres. Eliminar sigue estando en el menú "⋯".
@@ -285,6 +320,8 @@ se vería pero no se podría escribir ni arrastrar.
   íconos).
 - `src/allnotes.rs` — ventana "Todas las notas": buscador y grilla de
   tarjetas, dibujada a mano con GDI+ y doble buffer.
+- `src/settings.rs` — la pestaña "Configuración y sincronización".
+- `src/picker.rs` — el selector de notas del atajo global.
 - `src/sync.rs` — sincronización: la fusión (pura, con tests), cuándo
   sincronizar y cómo aplicar lo que llega de otra compu.
 - `src/oauth.rs` — inicio de sesión con Google (navegador + 127.0.0.1 +

@@ -66,16 +66,21 @@ impl Layer {
     }
 }
 
-/// Las cuatro partes de una nota que se sincronizan por separado, cada
-/// una con su propia hora de última modificación (`NoteData::t`). Así,
-/// mover una nota en una compu nunca pisa lo que se escribió en ella en
-/// otra: gana el cambio más nuevo **de cada parte**, no de la nota
-/// entera.
+/// Las cuatro partes de una nota, cada una con su propia hora de última
+/// modificación (`NoteData::t`): gana el cambio más nuevo **de cada
+/// parte**, no de la nota entera.
+///
+/// Solo se sincronizan las de `SYNCED` (lo que la nota *es*: su texto y
+/// su color). Dónde está y cómo se ve en el escritorio (`GEOM`, `STATE`)
+/// es de cada compu: cada una tiene su pantalla y su forma de acomodar.
+/// Una nota que llega nueva de otra compu toma de allá solo su lugar
+/// inicial.
 pub const CONTENT: usize = 0; // nombre y texto
 pub const COLOR: usize = 1;
 pub const GEOM: usize = 2; // posición y tamaño
 pub const STATE: usize = 3; // capa, modo de enrollado, enrollada
 pub const PARTS: usize = 4;
+pub const SYNCED: [usize; 2] = [CONTENT, COLOR];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct NoteData {
@@ -103,6 +108,10 @@ pub struct NoteData {
     /// `richtext.rs`). Vacío en una nota sin formato — y entonces ni se
     /// escribe en el archivo, que queda igual que antes de que existiera.
     pub fmt: String,
+    /// Guardada en "Todas las notas": sin ventana en el escritorio hasta
+    /// que se la abra o se la arrastre afuera. Es de esta compu (no va
+    /// al documento de Drive) y no es un cambio de ninguna parte.
+    pub hidden: bool,
     /// Última modificación de cada parte (ms desde 1970; ver `CONTENT`,
     /// `COLOR`, `GEOM`, `STATE`). 0 = nunca se guardó (nota recién
     /// creada: `app::save_all` le pone la hora).
@@ -129,6 +138,7 @@ impl NoteData {
             title: String::new(),
             text: String::new(),
             fmt: String::new(),
+            hidden: false,
             t: [0; PARTS],
         }
     }
@@ -180,9 +190,10 @@ impl NoteData {
         self.t[part] = other.t[part];
     }
 
-    /// Cuándo se tocó la nota por última vez (cualquier parte).
+    /// Cuándo se tocó la nota por última vez, en lo que se sincroniza
+    /// (moverla no la "revive" si la borraron en otra compu).
     pub fn last_change(&self) -> u64 {
-        self.t.iter().copied().max().unwrap_or(0)
+        SYNCED.iter().map(|&p| self.t[p]).max().unwrap_or(0)
     }
 }
 
@@ -253,8 +264,9 @@ pub fn save_notes(notes: &[NoteData]) -> bool {
 pub fn note_json(n: &NoteData, local: bool) -> String {
     let id = if local { format!("\"id\":{},", n.id) } else { String::new() };
     let fmt = if n.fmt.is_empty() { String::new() } else { format!("\"fmt\":\"{}\",", json::escape(&n.fmt)) };
+    let hidden = if local && n.hidden { "\"hidden\":true," } else { "" };
     format!(
-        "{{{id}\"uid\":\"{}\",\"x\":{},\"y\":{},\"w\":{},\"h\":{},\"color\":{},\"layer\":{},\"rollMode\":{},\"rolled\":{},\"title\":\"{}\",\"text\":\"{}\",{fmt}\"t\":[{},{},{},{}]}}",
+        "{{{id}{hidden}\"uid\":\"{}\",\"x\":{},\"y\":{},\"w\":{},\"h\":{},\"color\":{},\"layer\":{},\"rollMode\":{},\"rolled\":{},\"title\":\"{}\",\"text\":\"{}\",{fmt}\"t\":[{},{},{},{}]}}",
         json::escape(&n.uid),
         n.x,
         n.y,
@@ -295,6 +307,7 @@ pub fn note_from_json(j: &Json) -> Option<NoteData> {
         title: j.str_or("title", ""),
         text: j.str_or("text", ""),
         fmt: j.str_or("fmt", ""),
+        hidden: j.bool_or("hidden", false),
         t,
     })
 }
@@ -336,9 +349,16 @@ pub struct Settings {
     /// `update.rs`). Se puede apagar: la app no se conecta a nada que
     /// el usuario no haya elegido.
     pub auto_update: bool,
-    /// Notas translúcidas con Windhawk (ver `glass.rs`): 0 apagado,
-    /// 1 suave, 2 media, 3 fuerte.
+    /// Notas translúcidas con Windhawk (ver `glass.rs`): 0 apagada,
+    /// 1 suave (apenas se ve a través), 2 media, 3 fuerte (la más
+    /// transparente).
     pub translucency: u8,
+    /// Escala de las notas: 0 = 100 %, 1 = 125 %, 2 = 150 %.
+    pub scale: u8,
+    /// Atajo para traer una nota al frente (`picker.rs`): 0 ninguno,
+    /// 2 Ctrl+Alt+N, 3 Ctrl+Alt+Espacio. (El 1 era Win+Mayús+N, que abre
+    /// OneNote: al cargar pasa a ser Ctrl+Alt+N.)
+    pub hotkey: u8,
 }
 
 fn settings_path() -> PathBuf {
@@ -355,6 +375,12 @@ pub fn load_settings() -> Option<Settings> {
         desktop_menu: j.bool_or("desktopMenu", true),
         auto_update: j.bool_or("autoUpdate", true),
         translucency: j.u8_or("translucency", 2).min(3),
+        scale: j.u8_or("scale", 0).min(2),
+        hotkey: match j.u8_or("hotkey", 2) {
+            0 => 0,
+            3 => 3,
+            _ => 2,
+        },
     })
 }
 
@@ -363,12 +389,14 @@ pub fn save_settings(s: &Settings) -> bool {
         return false;
     }
     let json = format!(
-        "{{\"dark\":{},\"defaultRollMode\":{},\"desktopMenu\":{},\"autoUpdate\":{},\"translucency\":{}}}\n",
+        "{{\"dark\":{},\"defaultRollMode\":{},\"desktopMenu\":{},\"autoUpdate\":{},\"translucency\":{},\"scale\":{},\"hotkey\":{}}}\n",
         s.dark,
         s.default_roll_mode.as_u8(),
         s.desktop_menu,
         s.auto_update,
-        s.translucency
+        s.translucency,
+        s.scale,
+        s.hotkey,
     );
     write_atomic(&settings_path(), &json)
 }
@@ -458,12 +486,14 @@ mod tests {
         n.text = "leche\npan\t😀".into();
         n.layer = Layer::AlwaysOnTop;
         n.rolled = true;
+        n.hidden = true;
         n.t = [1, 2, 3, 1_790_079_957_123];
         let back = note_from_json(&json::parse(&note_json(&n, true)).unwrap()).unwrap();
         assert_eq!(back, n);
-        // Sin el número local (el documento de Drive), todo lo demás igual.
+        // Sin lo que es de esta compu (el documento de Drive): ni el
+        // número local ni si está guardada.
         let remote = note_from_json(&json::parse(&note_json(&n, false)).unwrap()).unwrap();
-        assert_eq!(remote.id, 0);
+        assert_eq!((remote.id, remote.hidden), (0, false));
         assert_eq!(remote.uid, n.uid);
     }
 
