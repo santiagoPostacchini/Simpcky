@@ -79,16 +79,20 @@ Ya funciona:
   DirectWrite.
 - **Escala**: encabezado, botones, márgenes y menús siguen los ppp del
   monitor (a 150 % antes todo quedaba chico).
-- **Notas translúcidas** (`backdrop.rs`): en el escritorio, cada nota
-  muestra el fondo de pantalla desenfocado con su color encima, como el
-  acrílico de Windows 11 o el mod "Translucent Windows" de Windhawk.
-  Windows (y ese mod) solo aplican el efecto a ventanas de primer nivel,
-  y una nota anclada es hija del escritorio: se imita. El fondo se pide a
-  `IDesktopWallpaper` (con su ubicación en cada monitor), se achica, se
-  desenfoca una sola vez y cada nota pinta su pedazo; el RichEdit va
-  transparente. Intensidad en el menú de la bandeja → Transparencia de
-  las notas (apagada, suave, media, fuerte). Sueltas o siempre encima,
-  las notas se pintan lisas (lo que tienen detrás no es el fondo).
+- **Transparencia con Windhawk** (`glass.rs`): con el mod "Translucent
+  Windows" de Windhawk activo, las notas toman su desenfoque, como el
+  resto de las aplicaciones. El mod solo toca ventanas de primer nivel con
+  estilo de ventana (`WS_POPUPWINDOW`), y al crearlas; una nota anclada es
+  hija del escritorio. Así que en este modo las notas del escritorio son
+  ventanas de primer nivel **poseídas** por el escritorio: Windows las
+  mantiene justo encima de él (detrás de las aplicaciones, visibles con
+  "Mostrar escritorio"), y al activarlas no pasan adelante de ninguna
+  aplicación (`WM_WINDOWPOSCHANGING`). Se pintan con alfa de verdad: el
+  color de la nota premultiplicado en un DIB de 32 bits, porque GDI
+  escribe alfa 0 y el compositor mostraría ese color aclarado. Los íconos
+  van con una máscara propia; el texto del RichEdit lo recompone el mod.
+  Intensidad en la bandeja → Transparencia con Windhawk. Sin el mod, las
+  notas vuelven solas a ancladas y lisas.
 - **Barra de desplazamiento fina**, del color de la nota: la de Windows
   queda recortada fuera de la vista y se dibuja una rayita que se
   ensancha con el mouse y se arrastra.
@@ -275,8 +279,8 @@ se vería pero no se podría escribir ni arrastrar.
   formato, íconos de Segoe Fluent Icons).
 - `src/d2d.rs` — Direct2D/DirectWrite a mano (emojis y títulos en
   color).
-- `src/backdrop.rs` — el fondo de pantalla desenfocado de las notas
-  translúcidas.
+- `src/glass.rs` — modo vidrio para el mod de Windhawk: detección del
+  mod y lienzo con alfa premultiplicado.
 - `src/desktop.rs` — anclar una nota al escritorio (el padre de los
   íconos).
 - `src/allnotes.rs` — ventana "Todas las notas": buscador y grilla de

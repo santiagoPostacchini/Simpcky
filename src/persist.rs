@@ -336,7 +336,7 @@ pub struct Settings {
     /// `update.rs`). Se puede apagar: la app no se conecta a nada que
     /// el usuario no haya elegido.
     pub auto_update: bool,
-    /// Notas del escritorio translúcidas (ver `backdrop.rs`): 0 apagado,
+    /// Notas translúcidas con Windhawk (ver `glass.rs`): 0 apagado,
     /// 1 suave, 2 media, 3 fuerte.
     pub translucency: u8,
 }

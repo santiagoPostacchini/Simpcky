@@ -4,7 +4,7 @@
 
 mod allnotes;
 mod app;
-mod backdrop;
+mod glass;
 mod crypto;
 mod d2d;
 mod desktop;
@@ -126,11 +126,9 @@ fn main() {
     allnotes::register_class(hinstance);
     welcome::register_class(hinstance);
 
-    // El fondo desenfocado de las notas translúcidas, antes de que haya
-    // notas que pintar (armarlo le pide el fondo de pantalla a Explorer).
-    if app::app().lock().unwrap().settings.translucency > 0 {
-        backdrop::warm();
-    }
+    // Modo vidrio (Windhawk): antes de crear las notas, que según esto son
+    // de una clase de ventana u otra.
+    glass::update();
 
     load_or_create_notes();
     // Lo que se acaba de cargar es el punto de partida para detectar
