@@ -221,8 +221,22 @@ fn apply_body_style(edit: HWND, color_idx: u8) {
 
 /// Deja aire entre el texto y el borde de la nota (el RichEdit por
 /// defecto arranca a escribir pegado al canto).
-fn apply_text_padding(edit: HWND, w: i32, content_h: i32) {
-    editor::set_padding(edit, w, content_h, px(edit, TEXT_PAD_X), px(edit, TEXT_PAD_Y));
+///
+/// Solo a los costados: el aire de arriba y de abajo lo pone la nota
+/// (el RichEdit arranca `TEXT_PAD_Y` más abajo y termina `TEXT_PAD_Y`
+/// antes, ver `edit_rect`). Con un margen de abajo adentro del RichEdit,
+/// la línea que queda a medias al final se dibujaba en ese margen y, al
+/// desplazar el texto, los pedazos de líneas viejas quedaban ahí pegados.
+fn apply_text_padding(edit: HWND, w: i32, edit_h: i32) {
+    editor::set_padding(edit, w, edit_h, px(edit, TEXT_PAD_X), 0);
+}
+
+/// Dónde va el RichEdit en una nota de `w`×`total_h`: debajo del
+/// encabezado, con aire arriba y abajo.
+fn edit_rect(hwnd: HWND, w: i32, total_h: i32) -> RECT {
+    let hh = header_h(hwnd);
+    let pad = px(hwnd, TEXT_PAD_Y);
+    RECT { left: 0, top: hh + pad, right: w, bottom: (total_h - pad).max(hh + pad) }
 }
 
 pub fn first_line(text: &str) -> String {
@@ -564,7 +578,7 @@ fn paint(hwnd: HWND, hdc: HDC) {
         }
     };
     let renaming = crate::rename::is_renaming(hwnd);
-    let (header_color, _, ink) = palette_entry(color);
+    let (header_color, body_color, ink) = palette_entry(color);
     let layout = layout_of(hwnd);
     let hot = header_state(hwnd, |s| s.hot);
     update_tooltips(hwnd, &layout);
@@ -621,6 +635,13 @@ fn paint(hwnd: HWND, hdc: HDC) {
         }
 
         BitBlt(hdc, 0, 0, width, hh, mem, 0, 0, SRCCOPY);
+        // Debajo del encabezado: el margen alrededor del texto (el
+        // RichEdit tapa el resto; WS_CLIPCHILDREN evita pisarlo).
+        if client.bottom > hh {
+            let body = CreateSolidBrush(body_color);
+            FillRect(hdc, &RECT { left: 0, top: hh, right: width, bottom: client.bottom }, body);
+            DeleteObject(body);
+        }
         SelectObject(mem, old_bmp);
         DeleteObject(bmp);
         DeleteDC(mem);
@@ -1288,12 +1309,12 @@ fn on_create(hwnd: HWND) {
             nr.data.layer,
         )
     };
-    let hh = header_h(hwnd);
-    let edit = editor::create(hwnd, hinstance as HINSTANCE, RICHEDIT_ID, RECT { left: 0, top: hh, right: w, bottom: hh + content_h });
+    let rc = edit_rect(hwnd, w, header_h(hwnd) + content_h);
+    let edit = editor::create(hwnd, hinstance as HINSTANCE, RICHEDIT_ID, rc);
     apply_body_style(edit, color);
     editor::load(edit, &text, &fmt);
     crate::theme::apply_scrollbars(edit);
-    apply_text_padding(edit, w, content_h);
+    apply_text_padding(edit, w, rc.bottom - rc.top);
     create_tooltips(hwnd);
     if rolled && !edit.is_null() {
         unsafe { ShowWindow(edit, SW_HIDE) };
@@ -1332,10 +1353,10 @@ fn on_size(hwnd: HWND, lparam: LPARAM) {
     }
     let w = (lparam & 0xffff) as i32;
     let total_h = ((lparam >> 16) & 0xffff) as i32;
-    let hh = header_h(hwnd);
-    let eh = (total_h - hh).max(0);
-    unsafe { SetWindowPos(edit, null_mut(), 0, hh, w, eh, SWP_NOZORDER) };
-    apply_text_padding(edit, w, eh);
+    let rc = edit_rect(hwnd, w, total_h);
+    unsafe { SetWindowPos(edit, null_mut(), rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, SWP_NOZORDER) };
+    apply_text_padding(edit, w, rc.bottom - rc.top);
+    unsafe { InvalidateRect(hwnd, null(), 0) };
 }
 
 /// Fin de un arrastre o de un resize (WM_EXITSIZEMOVE cubre ambos).
@@ -1503,7 +1524,13 @@ fn on_lbuttondown(hwnd: HWND, lparam: LPARAM) {
         }
         Hit::Pin => toggle_always_on_top(hwnd),
         Hit::Bar => on_bar_click(hwnd, x, y),
-        Hit::None => {}
+        Hit::None => {
+            let id = note_id(hwnd);
+            let edit = app().lock().unwrap().notes.get(&id).map(|nr| nr.edit as HWND);
+            if let Some(edit) = edit.filter(|e| !e.is_null()) {
+                unsafe { SetFocus(edit) };
+            }
+        }
     }
 }
 

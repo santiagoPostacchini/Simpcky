@@ -621,6 +621,7 @@ pub fn refresh(edit: HWND) {
 pub fn schedule_refresh(edit: HWND) {
     unsafe {
         SetTimer(edit, TIMER_REFRESH, 80, None);
+        paint_overlay(edit);
         // De vacía a con texto (o al revés): la ayuda en gris ocupa varias
         // líneas, y el RichEdit solo repintaría la primera.
         let gtl = GetTextLengthEx { flags: 2 | 8, codepage: 1200 };
@@ -1056,6 +1057,9 @@ fn line_bottom(edit: HWND, cp: usize, top: i32) -> i32 {
 }
 
 unsafe fn paint_overlay(edit: HWND) {
+    if IsWindowVisible(edit) == 0 {
+        return; // nota enrollada
+    }
     let text = units(edit);
     if text.is_empty() {
         paint_placeholder(edit);
@@ -1198,6 +1202,11 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
             paint_overlay(edit);
             r
         }
+        WM_KEYUP | WM_IME_CHAR | WM_IME_COMPOSITION | WM_LBUTTONUP | WM_UNDO | WM_CUT | WM_CLEAR => {
+            let r = DefSubclassProc(edit, msg, wparam, lparam);
+            paint_overlay(edit);
+            r
+        }
         WM_KEYDOWN => {
             let vk = wparam as u16;
             let alt = GetKeyState(VK_MENU as i32) < 0;
@@ -1219,6 +1228,7 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
                 }
             };
             if handled {
+                paint_overlay(edit);
                 // El WM_CHAR que TranslateMessage ya generó para esta tecla.
                 let swallow = match vk {
                     VK_RETURN => Some('\r' as u16),
@@ -1229,7 +1239,9 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
                 with_state(edit, |s| s.swallow = swallow);
                 return 0;
             }
-            DefSubclassProc(edit, msg, wparam, lparam)
+            let r = DefSubclassProc(edit, msg, wparam, lparam);
+            paint_overlay(edit);
+            r
         }
         WM_CHAR => {
             let c = wparam as u16;
@@ -1238,9 +1250,15 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
                 return 0;
             }
             if c == ' ' as u16 && on_space(edit) {
+                paint_overlay(edit);
                 return 0;
             }
-            DefSubclassProc(edit, msg, wparam, lparam)
+            // Al escribir, el RichEdit redibuja la línea en el acto (sin
+            // WM_PAINT), con el ☐ de la fuente y los emojis en gris: sin
+            // esto la casilla "cambiaba de tamaño" con cada letra.
+            let r = DefSubclassProc(edit, msg, wparam, lparam);
+            paint_overlay(edit);
+            r
         }
         WM_PASTE => {
             on_paste(edit);
@@ -1249,6 +1267,7 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
         WM_TIMER if wparam == TIMER_REFRESH => {
             KillTimer(edit, TIMER_REFRESH);
             refresh(edit);
+            paint_overlay(edit);
             0
         }
         WM_LBUTTONDOWN => {
@@ -1273,7 +1292,12 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
         }
         WM_MOUSEMOVE => {
             crate::note::on_hover(GetParent(edit));
-            DefSubclassProc(edit, msg, wparam, lparam)
+            let r = DefSubclassProc(edit, msg, wparam, lparam);
+            // Seleccionando con el mouse, el RichEdit también dibuja solo.
+            if wparam & 0x0001 != 0 {
+                paint_overlay(edit);
+            }
+            r
         }
         WM_CONTEXTMENU => {
             let p = if lparam == -1 {
