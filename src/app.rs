@@ -53,6 +53,14 @@ pub struct AppState {
 
 static APP: OnceLock<Mutex<AppState>> = OnceLock::new();
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+/// El último guardado de las notas falló (ver `save_all`).
+static SAVE_FAILING: AtomicBool = AtomicBool::new(false);
+
+/// `true` mientras las notas no se pueden guardar en el disco: la
+/// bandeja y el encabezado de cada nota lo muestran.
+pub fn save_failing() -> bool {
+    SAVE_FAILING.load(Ordering::Relaxed)
+}
 
 pub fn init_app(hinstance: isize, settings: Settings, sync: SyncState) {
     let _ = APP.set(Mutex::new(AppState {
@@ -114,7 +122,7 @@ pub fn forget_saved(id: u32) {
 /// cada parte de cada nota que difiera de lo último guardado recibe la
 /// hora actual, y cada nota que ya no está deja una lápida.
 pub fn save_all() {
-    let (changed, controller) = {
+    let (changed, controller, saved) = {
         let mut guard = app().lock().unwrap();
         let a = &mut *guard;
         let now = persist::now_ms();
@@ -155,15 +163,28 @@ pub fn save_all() {
 
         let mut list: Vec<NoteData> = a.notes.values().map(|nr| nr.data.clone()).collect();
         list.sort_by_key(|n| n.id);
-        persist::save_notes(&list);
+        let mut saved = persist::save_notes(&list);
         if new_tombs {
-            persist::save_sync_state(&a.sync);
+            saved &= persist::save_sync_state(&a.sync);
         }
         if changed {
             a.sync_dirty = true;
         }
-        (changed, a.controller_hwnd)
+        (changed, a.controller_hwnd, saved)
     };
+    // Si empezó a fallar (o volvió a andar), la bandeja avisa — con un
+    // mensaje en cola, nunca desde acá (ver la regla de oro arriba).
+    let failing = !saved;
+    if SAVE_FAILING.swap(failing, Ordering::Relaxed) != failing && controller != 0 {
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(
+                controller as windows_sys::Win32::Foundation::HWND,
+                crate::tray::WM_APP_SAVE_STATE,
+                failing as usize,
+                0,
+            )
+        };
+    }
     // "Todas las notas" se entera de cualquier cambio (se refresca con
     // un mensaje en cola, nunca en el acto: ver la regla de oro arriba).
     crate::allnotes::notify_changed();

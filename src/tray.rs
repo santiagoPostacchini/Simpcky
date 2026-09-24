@@ -40,6 +40,12 @@ pub const WM_APP_QUIT: u32 = WM_APP + 5;
 const WM_APP_RECREATE: u32 = WM_APP + 4;
 const TRAY_UID: u32 = 1;
 const TIMER_RECREATE: usize = 1;
+/// Las notas no se pudieron guardar (ver `app::save_all`): wParam 1 si
+/// empezó a fallar, 0 si volvió a andar.
+pub const WM_APP_SAVE_STATE: u32 = WM_APP + 6;
+/// Mientras no se puede guardar, se reintenta solo.
+const TIMER_SAVE_RETRY: usize = 40;
+const SAVE_RETRY_MS: u32 = 30_000;
 
 const ID_NEW_NOTE: u32 = 1000;
 const ID_ROLL_DEFAULT_MANUAL: u32 = 1001;
@@ -56,6 +62,7 @@ const ID_SYNC_CANCEL: u32 = 1013;
 const ID_UPDATE_INSTALL: u32 = 1020;
 const ID_UPDATE_CHECK: u32 = 1021;
 const ID_UPDATE_AUTO: u32 = 1022;
+const ID_SAVE_RETRY: u32 = 1030;
 
 fn taskbar_created_msg() -> u32 {
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -197,6 +204,30 @@ fn remove_tray_icon(hwnd: HWND) {
     }
 }
 
+/// Empezó a fallar el guardado de las notas, o volvió a andar. Que se
+/// note: un aviso de Windows, un ícono en la barra de cada nota y un
+/// ítem en el menú de la bandeja; y mientras tanto se reintenta solo.
+fn on_save_state(hwnd: HWND, failing: bool) {
+    unsafe {
+        if failing {
+            SetTimer(hwnd, TIMER_SAVE_RETRY, SAVE_RETRY_MS, None);
+        } else {
+            KillTimer(hwnd, TIMER_SAVE_RETRY);
+        }
+    }
+    if failing {
+        let text = if crate::sync::is_connected() {
+            "Algo (seguramente el antivirus) no deja escribir en el disco. Lo que escribís se sigue sincronizando con Google Drive, y Simpcky reintenta guardar solo."
+        } else {
+            "Algo (seguramente el antivirus) no deja escribir en el disco: no cierres Simpcky hasta que vuelva a guardar. Reintenta solo cada 30 segundos."
+        };
+        notify("Simpcky no puede guardar tus notas", text);
+    } else {
+        notify("Simpcky volvió a guardar tus notas", "Ya está todo guardado en el disco.");
+    }
+    note::repaint_headers();
+}
+
 /// Pide (en cola) que se recreen las notas que se quedaron sin ventana.
 pub fn request_recreate() {
     let hwnd = { app().lock().unwrap().controller_hwnd } as HWND;
@@ -296,6 +327,14 @@ fn show_tray_menu(hwnd: HWND) {
         // por defecto bajo su encabezado, todas las notas, y al final
         // las preferencias y salir.
         let menu = CreatePopupMenu();
+
+        // Si no se puede guardar, es lo primero que tiene que verse.
+        if crate::app::save_failing() {
+            let label = wide("\u{26A0} No se pueden guardar las notas: reintentar");
+            AppendMenuW(menu, MF_STRING, ID_SAVE_RETRY as usize, label.as_ptr());
+            SetMenuDefaultItem(menu, ID_SAVE_RETRY, 0);
+            AppendMenuW(menu, MF_SEPARATOR, 0, null());
+        }
 
         // Una actualización pendiente va primero y en negrita: es lo
         // único del menú que el usuario no sabe que existe.
@@ -434,6 +473,7 @@ fn handle_command(hwnd: HWND, id: u32) {
         ID_UPDATE_INSTALL => crate::update::install(),
         ID_UPDATE_CHECK => crate::update::check_now(),
         ID_UPDATE_AUTO => crate::update::toggle_auto(),
+        ID_SAVE_RETRY => crate::app::save_all(),
         _ => {}
     }
 }
@@ -503,6 +543,14 @@ unsafe extern "system" fn controller_wndproc(hwnd: HWND, msg: u32, wparam: WPARA
         }
         WM_TIMER if wparam == crate::sync::TIMER_SYNC_SOON || wparam == crate::sync::TIMER_SYNC_POLL => {
             crate::sync::on_timer(wparam);
+            0
+        }
+        WM_APP_SAVE_STATE => {
+            on_save_state(hwnd, wparam != 0);
+            0
+        }
+        WM_TIMER if wparam == TIMER_SAVE_RETRY => {
+            crate::app::save_all();
             0
         }
         WM_TIMER if wparam == TIMER_RECREATE => {

@@ -13,6 +13,9 @@
 //!   de cada WM_PAINT se pintan encima (ver `paint_overlay`).
 //! - **Pegar sin arrastrar formato ajeno**: lo pegado conserva negrita &
 //!   cía., pero toma la letra, el tamaño y los colores de la nota.
+//! - **Barra de desplazamiento fina**, del color de la nota: la de Windows
+//!   queda fuera de la vista (ver `hidden_bar_width`) y se dibuja otra
+//!   encima, que se ensancha con el mouse y se puede arrastrar.
 //!
 //! Los cambios "de presentación" (sangría de las listas, tareas hechas
 //! en gris y tachadas, limpiar lo pegado) se hacen con el deshacer del
@@ -69,6 +72,8 @@ const TO_ADVANCEDTYPOGRAPHY: usize = 0x0001;
 const SCF_SELECTION: usize = 0x0001;
 const SCF_ALL: usize = 0x0004;
 const ES_NOOLEDRAGDROP: u32 = 0x0008;
+const ES_DISABLENOSCROLL: u32 = 0x2000;
+const WM_MOUSELEAVE: u32 = 0x02A3;
 
 const CFM_BOLD: u32 = 0x0000_0001;
 const CFM_ITALIC: u32 = 0x0000_0002;
@@ -220,6 +225,10 @@ struct EditState {
     /// Dónde estaban los emojis la última vez que se les puso su letra
     /// (ver `fix_faces`).
     emojis: Vec<(usize, usize)>,
+    /// El mouse está sobre la barra de desplazamiento propia.
+    bar_hover: bool,
+    /// Arrastrando la barra: a qué altura del pulgar se lo agarró.
+    bar_drag: Option<i32>,
 }
 
 /// Temporizador del RichEdit para acomodar la presentación un momento
@@ -255,6 +264,10 @@ pub fn create(parent: HWND, hinstance: HINSTANCE, id: usize, rc: RECT) -> HWND {
                 | (ES_MULTILINE as u32)
                 | (ES_AUTOVSCROLL as u32)
                 | (ES_WANTRETURN as u32)
+                // La barra de Windows siempre presente (deshabilitada si no
+                // hace falta): así el ancho del texto no cambia cuando
+                // aparece, y la nota la deja fuera de la vista.
+                | ES_DISABLENOSCROLL
                 // Arrastrar texto desde otra app traería su formato (y no
                 // pasa por `on_paste`); adentro de una nota casi no se usa.
                 | ES_NOOLEDRAGDROP,
@@ -284,7 +297,16 @@ pub fn create(parent: HWND, hinstance: HINSTANCE, id: usize, rc: RECT) -> HWND {
             com_release(ole);
         }
         EDITS.with(|m| {
-            m.borrow_mut().insert(edit as isize, EditState { doc, body: 0xffffff, ink: 0, swallow: None, lists: Vec::new(), emojis: Vec::new() })
+            m.borrow_mut().insert(edit as isize, EditState {
+                    doc,
+                    body: 0xffffff,
+                    ink: 0,
+                    swallow: None,
+                    lists: Vec::new(),
+                    emojis: Vec::new(),
+                    bar_hover: false,
+                    bar_drag: None,
+                })
         });
         SetWindowSubclass(edit, Some(subclass_proc), 1, 0);
         edit
@@ -1060,6 +1082,116 @@ unsafe fn paint_overlay(edit: HWND) {
     if IsWindowVisible(edit) == 0 {
         return; // nota enrollada
     }
+    paint_marks(edit);
+    paint_bar(edit);
+}
+
+// -----------------------------------------------------------------
+// Barra de desplazamiento propia
+// -----------------------------------------------------------------
+
+/// Ancho de la barra de Windows del RichEdit: la nota lo hace más ancho
+/// en esa medida, así la barra queda del otro lado del borde, recortada.
+/// El RichEdit la sigue manejando (rueda, teclado, rangos); acá solo se
+/// dibuja una más fina encima.
+pub fn hidden_bar_width(hwnd: HWND) -> i32 {
+    unsafe {
+        windows_sys::Win32::UI::HiDpi::GetSystemMetricsForDpi(SM_CXVSCROLL, GetDpiForWindow(hwnd).max(96))
+    }
+}
+
+fn scale(edit: HWND, v: i32) -> i32 {
+    v * unsafe { GetDpiForWindow(edit) }.max(96) as i32 / 96
+}
+
+/// La franja de la barra (a la derecha, dentro del margen del texto), el
+/// recorrido y el pulgar, o `None` si el texto entra entero.
+struct Bar {
+    strip: RECT,
+    track: RECT,
+    thumb: RECT,
+    min: i32,
+    range: i32,
+    page: i32,
+}
+
+fn bar(edit: HWND) -> (RECT, Option<Bar>) {
+    let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    unsafe { GetClientRect(edit, &mut rc) };
+    let strip = RECT { left: rc.right - scale(edit, 14), top: 0, right: rc.right, bottom: rc.bottom };
+    let mut si: SCROLLINFO = unsafe { std::mem::zeroed() };
+    si.cbSize = std::mem::size_of::<SCROLLINFO>() as u32;
+    si.fMask = SIF_ALL;
+    if unsafe { GetScrollInfo(edit, SB_VERT as i32, &mut si) } == 0 {
+        return (strip, None);
+    }
+    let range = si.nMax - si.nMin + 1;
+    let page = si.nPage as i32;
+    if page <= 0 || range <= page {
+        return (strip, None);
+    }
+    let track = RECT { left: strip.left, top: scale(edit, 2), right: strip.right, bottom: rc.bottom - scale(edit, 2) };
+    let track_h = (track.bottom - track.top).max(1);
+    let th = (track_h * page / range).max(scale(edit, 28)).min(track_h);
+    let ty = track.top + (track_h - th) * (si.nPos - si.nMin).clamp(0, range - page) / (range - page).max(1);
+    let thumb = RECT { left: strip.left, top: ty, right: strip.right, bottom: ty + th };
+    (strip, Some(Bar { strip, track, thumb, min: si.nMin, range, page }))
+}
+
+/// Tapa la franja (el pulgar anterior se corre con el texto cuando el
+/// RichEdit desplaza la ventana) y dibuja el pulgar donde va: una
+/// rayita del color de la tinta, más ancha con el mouse encima.
+unsafe fn paint_bar(edit: HWND) {
+    let (strip, bar) = bar(edit);
+    let (ink, body) = colors(edit);
+    let hdc = GetDC(edit);
+    let brush = CreateSolidBrush(body);
+    FillRect(hdc, &strip, brush);
+    DeleteObject(brush);
+    if let Some(b) = bar {
+        let (hover, drag) = with_state(edit, |s| (s.bar_hover, s.bar_drag.is_some())).unwrap_or((false, false));
+        let wide = hover || drag;
+        let w = if wide { scale(edit, 6) } else { scale(edit, 3) };
+        let cx = b.strip.right - scale(edit, 8);
+        let r = RECT { left: cx - w / 2, top: b.thumb.top, right: cx - w / 2 + w, bottom: b.thumb.bottom };
+        let mix = |sh: u32, a: u32| (((ink >> sh) & 0xff) * a + ((body >> sh) & 0xff) * (100 - a)) / 100;
+        let a = if wide { 60 } else { 35 };
+        let color = mix(0, a) | (mix(8, a) << 8) | (mix(16, a) << 16);
+        let mut g: *mut GpGraphics = null_mut();
+        if GdipCreateFromHDC(hdc, &mut g) == Ok && !g.is_null() {
+            GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
+            flyout::fill_round(g, &r, w as f32 / 2.0, color);
+            GdipDeleteGraphics(g);
+        }
+    }
+    ReleaseDC(edit, hdc);
+}
+
+/// Lleva el pulgar a que su borde de arriba quede en `top`.
+fn drag_bar_to(edit: HWND, top: i32) {
+    let (_, Some(b)) = bar(edit) else { return };
+    let span = (b.track.bottom - b.track.top) - (b.thumb.bottom - b.thumb.top);
+    let frac = (top - b.track.top).clamp(0, span.max(0));
+    let pos = b.min + ((b.range - b.page) as i64 * frac as i64 / span.max(1) as i64) as i32;
+    let mut cur = POINT { x: 0, y: 0 };
+    unsafe {
+        send(edit, EM_GETSCROLLPOS, 0, &mut cur as *mut POINT as isize);
+        let p = POINT { x: cur.x, y: pos };
+        send(edit, EM_SETSCROLLPOS, 0, &p as *const POINT as isize);
+    }
+}
+
+/// ¿El punto cae en la franja de la barra, y hay algo que desplazar?
+fn on_bar(edit: HWND, x: i32) -> Option<Bar> {
+    let (strip, bar) = bar(edit);
+    if x >= strip.left {
+        bar
+    } else {
+        None
+    }
+}
+
+unsafe fn paint_marks(edit: HWND) {
     let text = units(edit);
     if text.is_empty() {
         paint_placeholder(edit);
@@ -1202,7 +1334,7 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
             paint_overlay(edit);
             r
         }
-        WM_KEYUP | WM_IME_CHAR | WM_IME_COMPOSITION | WM_LBUTTONUP | WM_UNDO | WM_CUT | WM_CLEAR => {
+        WM_KEYUP | WM_IME_CHAR | WM_IME_COMPOSITION | WM_UNDO | WM_CUT | WM_CLEAR => {
             let r = DefSubclassProc(edit, msg, wparam, lparam);
             paint_overlay(edit);
             r
@@ -1273,6 +1405,18 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
         WM_LBUTTONDOWN => {
             let x = (lparam & 0xffff) as i16 as i32;
             let y = ((lparam >> 16) & 0xffff) as i16 as i32;
+            if let Some(b) = on_bar(edit, x) {
+                if y >= b.thumb.top && y < b.thumb.bottom {
+                    with_state(edit, |s| s.bar_drag = Some(y - b.thumb.top));
+                    SetCapture(edit);
+                } else {
+                    // Clic en el recorrido: una página para ese lado.
+                    let dir = if y < b.thumb.top { SB_PAGEUP } else { SB_PAGEDOWN };
+                    SendMessageW(edit, WM_VSCROLL, dir as usize, 0);
+                }
+                paint_overlay(edit);
+                return 0;
+            }
             if let Some(a) = checkbox_at(edit, x, y) {
                 SetFocus(edit);
                 toggle_todo(edit, a);
@@ -1284,6 +1428,10 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
             let mut p = POINT { x: 0, y: 0 };
             GetCursorPos(&mut p);
             ScreenToClient(edit, &mut p);
+            if (lparam & 0xffff) as u32 == HTCLIENT && on_bar(edit, p.x).is_some() {
+                SetCursor(LoadCursorW(null_mut(), IDC_ARROW));
+                return 1;
+            }
             if (lparam & 0xffff) as u32 == HTCLIENT && checkbox_at(edit, p.x, p.y).is_some() {
                 SetCursor(LoadCursorW(null_mut(), IDC_HAND));
                 return 1;
@@ -1292,10 +1440,64 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
         }
         WM_MOUSEMOVE => {
             crate::note::on_hover(GetParent(edit));
+            let x = (lparam & 0xffff) as i16 as i32;
+            let y = ((lparam >> 16) & 0xffff) as i16 as i32;
+            if let Some(grab) = with_state(edit, |s| s.bar_drag).flatten() {
+                drag_bar_to(edit, y - grab);
+                paint_overlay(edit);
+                return 0;
+            }
+            let hover = on_bar(edit, x).is_some();
+            if with_state(edit, |s| std::mem::replace(&mut s.bar_hover, hover)) != Some(hover) {
+                if hover {
+                    // Para enterarse cuando el mouse se va (WM_MOUSELEAVE).
+                    let mut tme = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: edit, dwHoverTime: 0 };
+                    TrackMouseEvent(&mut tme);
+                }
+                paint_bar(edit);
+            }
             let r = DefSubclassProc(edit, msg, wparam, lparam);
             // Seleccionando con el mouse, el RichEdit también dibuja solo.
             if wparam & 0x0001 != 0 {
                 paint_overlay(edit);
+            }
+            r
+        }
+        WM_LBUTTONUP => {
+            if with_state(edit, |s| s.bar_drag.take()).flatten().is_some() {
+                ReleaseCapture();
+                paint_overlay(edit);
+                return 0;
+            }
+            let r = DefSubclassProc(edit, msg, wparam, lparam);
+            paint_overlay(edit);
+            r
+        }
+        WM_CAPTURECHANGED => {
+            if with_state(edit, |s| s.bar_drag.take()).flatten().is_some() {
+                paint_bar(edit);
+            }
+            DefSubclassProc(edit, msg, wparam, lparam)
+        }
+        WM_MOUSELEAVE => {
+            if with_state(edit, |s| std::mem::replace(&mut s.bar_hover, false)) == Some(true) {
+                paint_bar(edit);
+            }
+            DefSubclassProc(edit, msg, wparam, lparam)
+        }
+        // El borde de la nota sigue sirviendo para cambiarle el tamaño,
+        // aunque el texto llegue hasta ahí.
+        WM_NCHITTEST => {
+            let r = DefSubclassProc(edit, msg, wparam, lparam);
+            if r as u32 == HTCLIENT {
+                let mut p = POINT { x: (lparam & 0xffff) as i16 as i32, y: ((lparam >> 16) & 0xffff) as i16 as i32 };
+                ScreenToClient(edit, &mut p);
+                let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                GetClientRect(edit, &mut rc);
+                let edge = scale(edit, 4);
+                if p.x < edge || p.x >= rc.right - edge {
+                    return HTTRANSPARENT as LRESULT;
+                }
             }
             r
         }

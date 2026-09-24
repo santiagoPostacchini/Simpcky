@@ -239,12 +239,13 @@ fn parse_notes(text: &str, now: u64) -> Vec<NoteData> {
         .collect()
 }
 
-pub fn save_notes(notes: &[NoteData]) {
+/// `false` si no se pudo escribir (ver `app::save_all`: se avisa).
+pub fn save_notes(notes: &[NoteData]) -> bool {
     if fs::create_dir_all(data_dir()).is_err() {
-        return;
+        return false;
     }
     let body: Vec<String> = notes.iter().map(|n| format!("  {}", note_json(n, true))).collect();
-    write_atomic(&notes_path(), &format!("[\n{}\n]", body.join(",\n")));
+    write_atomic(&notes_path(), &format!("[\n{}\n]", body.join(",\n")))
 }
 
 /// Una nota en JSON. `local`: incluir el número local (`notes.json`) o
@@ -301,11 +302,19 @@ pub fn note_from_json(j: &Json) -> Option<NoteData> {
 /// Escribe a un archivo temporal y lo renombra encima del real: si la
 /// app muere a mitad de la escritura (un apagado, un cuelgue), queda
 /// el archivo anterior entero en vez de uno cortado por la mitad.
-fn write_atomic(path: &std::path::Path, contents: &str) {
+///
+/// `true` si quedó escrito. Antes los errores se ignoraban, y un antivirus
+/// que no dejaba escribir hacía que la app "guardara" durante horas sin
+/// guardar nada, sin que nadie se enterara.
+fn write_atomic(path: &std::path::Path, contents: &str) -> bool {
     let tmp = path.with_extension("json.tmp");
-    if fs::write(&tmp, contents).is_ok() && fs::rename(&tmp, path).is_err() {
-        let _ = fs::write(path, contents);
+    if fs::write(&tmp, contents).is_ok() {
+        if fs::rename(&tmp, path).is_ok() {
+            return true;
+        }
+        let _ = fs::remove_file(&tmp);
     }
+    fs::write(path, contents).is_ok()
 }
 
 // ---------------------------------------------------------------------
@@ -345,9 +354,9 @@ pub fn load_settings() -> Option<Settings> {
     })
 }
 
-pub fn save_settings(s: &Settings) {
+pub fn save_settings(s: &Settings) -> bool {
     if fs::create_dir_all(data_dir()).is_err() {
-        return;
+        return false;
     }
     let json = format!(
         "{{\"dark\":{},\"defaultRollMode\":{},\"desktopMenu\":{},\"autoUpdate\":{}}}\n",
@@ -356,7 +365,7 @@ pub fn save_settings(s: &Settings) {
         s.desktop_menu,
         s.auto_update
     );
-    write_atomic(&settings_path(), &json);
+    write_atomic(&settings_path(), &json)
 }
 
 // ---------------------------------------------------------------------
@@ -403,9 +412,9 @@ pub fn load_sync_state() -> SyncState {
     }
 }
 
-pub fn save_sync_state(s: &SyncState) {
+pub fn save_sync_state(s: &SyncState) -> bool {
     if fs::create_dir_all(data_dir()).is_err() {
-        return;
+        return false;
     }
     let json = format!(
         "{{\"email\":\"{}\",\"fileId\":\"{}\",\"md5\":\"{}\",\"lastSync\":{},\"deleted\":{}}}\n",
@@ -415,7 +424,7 @@ pub fn save_sync_state(s: &SyncState) {
         s.last_sync,
         tombs_json(&s.tombs)
     );
-    write_atomic(&sync_path(), &json);
+    write_atomic(&sync_path(), &json)
 }
 
 pub fn tombs_json(tombs: &[Tomb]) -> String {

@@ -232,11 +232,13 @@ fn apply_text_padding(edit: HWND, w: i32, edit_h: i32) {
 }
 
 /// Dónde va el RichEdit en una nota de `w`×`total_h`: debajo del
-/// encabezado, con aire arriba y abajo.
+/// encabezado, con aire arriba y abajo, y más ancho que la nota justo lo
+/// que mide su barra de desplazamiento, que así queda recortada (la que
+/// se ve es la fina que dibuja `editor.rs`).
 fn edit_rect(hwnd: HWND, w: i32, total_h: i32) -> RECT {
     let hh = header_h(hwnd);
     let pad = px(hwnd, TEXT_PAD_Y);
-    RECT { left: 0, top: hh + pad, right: w, bottom: (total_h - pad).max(hh + pad) }
+    RECT { left: 0, top: hh + pad, right: w + editor::hidden_bar_width(hwnd), bottom: (total_h - pad).max(hh + pad) }
 }
 
 pub fn first_line(text: &str) -> String {
@@ -320,6 +322,9 @@ const BTN_H: i32 = 30;
 struct HeaderLayout {
     /// Alto del encabezado, ya escalado.
     height: i32,
+    /// El ícono de "no se pudo guardar", antes del título (ver
+    /// `app::save_failing`).
+    warn: Option<RECT>,
     add: RECT,
     pin: RECT,
     chevron: Option<RECT>,
@@ -332,7 +337,7 @@ struct HeaderLayout {
 }
 
 impl HeaderLayout {
-    fn new(width: i32, buttons: bool, chevron: bool, dpi: i32) -> Self {
+    fn new(width: i32, buttons: bool, chevron: bool, dpi: i32, warn: bool) -> Self {
         let p = |v| flyout::px(dpi, v);
         let height = p(HEADER_H);
         let (bw, bh, edge) = (p(BTN_W), p(BTN_H), p(6));
@@ -341,8 +346,10 @@ impl HeaderLayout {
         let more = slot(0);
         let (chevron, pin, add) = if chevron { (Some(slot(1)), slot(2), slot(3)) } else { (None, slot(1), slot(2)) };
         let right = if buttons { add.left - p(4) } else { width - p(14) };
-        let title_rect = RECT { left: p(14), top: 0, right: right.max(p(14)), bottom: height };
-        HeaderLayout { height, add, pin, chevron, more, title_rect, buttons }
+        let warn = warn.then(|| RECT { left: p(8), top, right: p(8) + bh, bottom: top + bh });
+        let left = warn.map(|r| r.right + p(2)).unwrap_or(p(14));
+        let title_rect = RECT { left, top: 0, right: right.max(left), bottom: height };
+        HeaderLayout { height, warn, add, pin, chevron, more, title_rect, buttons }
     }
 
     fn hit(&self, x: i32, y: i32) -> Hit {
@@ -397,7 +404,16 @@ fn layout_of(hwnd: HWND) -> HeaderLayout {
     let auto = app().lock().unwrap().notes.get(&id).is_some_and(|nr| nr.data.roll_mode == RollMode::Auto);
     let hover = header_state(hwnd, |s| s.hover);
     let buttons = hover || has_focus(hwnd) || crate::rename::is_renaming(hwnd);
-    HeaderLayout::new(rc.right, buttons, !auto, px(hwnd, 96))
+    HeaderLayout::new(rc.right, buttons, !auto, px(hwnd, 96), crate::app::save_failing())
+}
+
+/// Repinta el encabezado de todas las notas (cambió algo que muestran
+/// todas, como el aviso de que no se puede guardar).
+pub fn repaint_headers() {
+    let list: Vec<HWND> = app().lock().unwrap().notes.values().map(|nr| nr.hwnd as HWND).filter(|h| !h.is_null()).collect();
+    for h in list {
+        invalidate_header(h);
+    }
 }
 
 fn invalidate_header(hwnd: HWND) {
@@ -462,11 +478,12 @@ fn hot_tick(hwnd: HWND) {
     invalidate_header(hwnd);
 }
 
-const TIPS: [(usize, &str); 4] = [
+const TIPS: [(usize, &str); 5] = [
     (1, "Nota nueva (Ctrl+N)"),
     (2, "Siempre encima (Ctrl+Mayús+T)"),
     (3, "Enrollar o desenrollar (Ctrl+R)"),
     (4, "Color y más opciones"),
+    (5, "No se pudo guardar en el disco: Simpcky reintenta solo (ver el ícono de la bandeja)"),
 ];
 
 /// Las ayudas que aparecen al dejar el mouse sobre un botón.
@@ -518,6 +535,7 @@ fn update_tooltips(hwnd: HWND, layout: &HeaderLayout) {
         (2, if layout.buttons { layout.pin } else { none }),
         (3, if layout.buttons { layout.chevron.unwrap_or(none) } else { none }),
         (4, if layout.buttons { layout.more } else { none }),
+        (5, layout.warn.unwrap_or(none)),
     ];
     for (id, rect) in rects {
         let mut ti: TTTOOLINFOW = unsafe { std::mem::zeroed() };
@@ -620,6 +638,10 @@ fn paint(hwnd: HWND, hdc: HDC) {
                 flyout::draw_glyph(mem, flyout::icon_font(-px(hwnd, 15)), glyph, &rect, ink);
             }
             GdipDeleteGraphics(g);
+        }
+
+        if let Some(r) = layout.warn {
+            flyout::draw_glyph(mem, flyout::icon_font(-px(hwnd, 16)), 0xE7BA, &r, ink);
         }
 
         // El título (el nombre, o la primera línea del texto) se ve
