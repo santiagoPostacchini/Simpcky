@@ -179,12 +179,22 @@ pub fn create_note(data: NoteData) -> HWND {
         // caption), así que se pide a mano; si no, la nota se ve como
         // un rectángulo a secas en vez de una tarjeta.
         let pref: i32 = DWMWCP_ROUND;
+        // Sin el borde gris de 1 px que Windows 11 le pone alrededor a
+        // las ventanas redondeadas: la nota es su color (y en modo vidrio
+        // el desenfoque), sin marco.
+        let border: u32 = DWMWA_COLOR_NONE;
         unsafe {
             DwmSetWindowAttribute(
                 hwnd,
                 DWMWA_WINDOW_CORNER_PREFERENCE as u32,
                 &pref as *const i32 as *const c_void,
                 std::mem::size_of::<i32>() as u32,
+            );
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_BORDER_COLOR as u32,
+                &border as *const u32 as *const c_void,
+                std::mem::size_of::<u32>() as u32,
             );
         }
     }
@@ -660,7 +670,7 @@ fn paint(hwnd: HWND, hdc: HDC) {
 
         // El título (el nombre, o la primera línea del texto) se ve
         // siempre en el encabezado, esté enrollada o no.
-        if !renaming && !crate::d2d::draw_title(mem, layout.title_rect, &title, ink, crate::d2d::Bg::Solid(header_color), px(hwnd, 15)) {
+        if !renaming && !crate::d2d::draw_title(mem, layout.title_rect, &title, (ink, 0xff), crate::d2d::Bg::Solid(header_color), px(hwnd, 15)) {
             // Sin DirectWrite (no debería pasar): con GDI, emojis en gris.
             let old_font = SelectObject(mem, header_font(hwnd));
             SetTextColor(mem, ink);
@@ -1511,8 +1521,11 @@ unsafe fn paint_glass_header(
     }
     if !renaming {
         // Con DirectWrite (emojis en color); si no, texto GDI con su alfa.
-        if !crate::d2d::draw_title(c.dc, layout.title_rect, title, ink, crate::d2d::Bg::Glass(header_color, alpha), px(hwnd, 15)) {
-            c.text(layout.title_rect, title, header_font(hwnd), ink, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_LEFT | DT_NOPREFIX);
+        // El título, semitransparente como el resto de la nota.
+        let ink_alpha = crate::glass::title_alpha();
+        if !crate::d2d::draw_title(c.dc, layout.title_rect, title, (ink, ink_alpha), crate::d2d::Bg::Glass(header_color, alpha), px(hwnd, 15)) {
+            let format = DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_LEFT | DT_NOPREFIX;
+            c.text_alpha(layout.title_rect, title, header_font(hwnd), ink, ink_alpha, format);
         }
     }
     c.blit(hdc, 0, 0);

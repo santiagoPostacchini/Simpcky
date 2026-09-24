@@ -238,12 +238,19 @@ pub fn draw_emoji(hdc: HDC, cell: RECT, clip: RECT, text: &[u16], size_px: u32, 
 
 /// El título de una nota, en semibold, con "…" si no entra y los emojis
 /// en color (con GDI salían en gris, al lado de los del texto en color).
-pub fn draw_title(hdc: HDC, rect: RECT, text: &str, ink: u32, bg: Bg, size_px: i32) -> bool {
+pub fn draw_title(hdc: HDC, rect: RECT, text: &str, (ink, ink_alpha): (u32, u8), bg: Bg, size_px: i32) -> bool {
     let w: Vec<u16> = text.encode_utf16().collect();
-    draw(hdc, rect, rect, &w, ("Segoe UI", DWRITE_FONT_WEIGHT_SEMIBOLD, size_px.max(1) as u32 * 10, false), ink, bg)
+    let key = ("Segoe UI", DWRITE_FONT_WEIGHT_SEMIBOLD, size_px.max(1) as u32 * 10, false);
+    draw_alpha(hdc, rect, rect, &w, key, (ink, ink_alpha), bg)
 }
 
 fn draw(hdc: HDC, cell: RECT, clip: RECT, text: &[u16], key: Key, fg: u32, bg: Bg) -> bool {
+    draw_alpha(hdc, cell, clip, text, key, (fg, 0xff), bg)
+}
+
+/// `draw`, con el texto a opacidad `fg_alpha` (solo cuenta con `Bg::Glass`:
+/// sobre un fondo liso no hay nada que se vea a través).
+fn draw_alpha(hdc: HDC, cell: RECT, clip: RECT, text: &[u16], key: Key, (fg, fg_alpha): (u32, u8), bg: Bg) -> bool {
     let bound = RECT {
         left: cell.left.max(clip.left),
         top: cell.top.max(clip.top),
@@ -278,7 +285,7 @@ fn draw(hdc: HDC, cell: RECT, clip: RECT, text: &[u16], key: Key, fg: u32, bg: B
         // ID2D1RenderTarget::CreateSolidColorBrush
         let brush: unsafe extern "system" fn(*mut c_void, *const ColorF, *const c_void, *mut *mut c_void) -> i32 = method(rt, 8);
         brush(rt, &ColorF { a: bg_alpha, ..color(bg_color) }, std::ptr::null(), &mut bg_brush);
-        brush(rt, &color(fg), std::ptr::null(), &mut fg_brush);
+        brush(rt, &ColorF { a: fg_alpha as f32 / 255.0, ..color(fg) }, std::ptr::null(), &mut fg_brush);
         if bg_brush.is_null() || fg_brush.is_null() {
             release(bg_brush);
             release(fg_brush);

@@ -75,6 +75,16 @@ pub fn opacity() -> Option<(u8, u8)> {
     }
 }
 
+/// Opacidad del título de la nota en modo vidrio: como el resto, deja
+/// ver un poco el desenfoque (más cuanto más suave el nivel).
+pub fn title_alpha() -> u8 {
+    match crate::app::app().lock().unwrap().settings.translucency {
+        1 => 0x99, // suave
+        3 => 0xDD, // fuerte
+        _ => 0xBB, // media
+    }
+}
+
 /// Un píxel BGRA premultiplicado a partir de un color GDI (0x00BBGGRR).
 fn premultiplied(color: u32, alpha: u8) -> u32 {
     let a = alpha as u32;
@@ -159,6 +169,11 @@ impl Canvas {
     /// de cada píxel es la opacidad con la que se compone el color. No
     /// depende de que el mod recomponga el texto.
     pub fn text(&self, r: RECT, text: &str, font: HFONT, color: u32, format: u32) {
+        self.text_alpha(r, text, font, color, 255, format);
+    }
+
+    /// `text`, con el texto a opacidad `alpha`.
+    pub fn text_alpha(&self, r: RECT, text: &str, font: HFONT, color: u32, alpha: u8, format: u32) {
         let (w, h) = (r.right - r.left, r.bottom - r.top);
         let Some(mask) = Canvas::new(w, h) else { return };
         let full = RECT { left: 0, top: 0, right: w, bottom: h };
@@ -184,7 +199,7 @@ impl Canvas {
                         continue;
                     }
                     let m = *mask.bits.add((y * w + x) as usize);
-                    let cov = ((m >> 16) & 0xff).max((m >> 8) & 0xff).max(m & 0xff);
+                    let cov = ((m >> 16) & 0xff).max((m >> 8) & 0xff).max(m & 0xff) * alpha as u32 / 255;
                     if cov == 0 {
                         continue;
                     }
