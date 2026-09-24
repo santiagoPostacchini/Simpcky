@@ -4,6 +4,7 @@
 
 mod allnotes;
 mod app;
+mod glass;
 mod crypto;
 mod d2d;
 mod desktop;
@@ -100,6 +101,7 @@ fn main() {
         default_roll_mode: RollMode::Manual,
         desktop_menu: true,
         auto_update: true,
+        translucency: 2,
     });
     theme::init(settings.dark);
 
@@ -123,6 +125,10 @@ fn main() {
     tray::register_class(hinstance);
     allnotes::register_class(hinstance);
     welcome::register_class(hinstance);
+
+    // Modo vidrio (Windhawk): antes de crear las notas, que según esto son
+    // de una clase de ventana u otra.
+    glass::update();
 
     load_or_create_notes();
     // Lo que se acaba de cargar es el punto de partida para detectar

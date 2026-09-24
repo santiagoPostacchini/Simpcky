@@ -336,6 +336,9 @@ pub struct Settings {
     /// `update.rs`). Se puede apagar: la app no se conecta a nada que
     /// el usuario no haya elegido.
     pub auto_update: bool,
+    /// Notas translúcidas con Windhawk (ver `glass.rs`): 0 apagado,
+    /// 1 suave, 2 media, 3 fuerte.
+    pub translucency: u8,
 }
 
 fn settings_path() -> PathBuf {
@@ -351,6 +354,7 @@ pub fn load_settings() -> Option<Settings> {
         default_roll_mode: RollMode::from_u8(j.u8_or("defaultRollMode", 0)),
         desktop_menu: j.bool_or("desktopMenu", true),
         auto_update: j.bool_or("autoUpdate", true),
+        translucency: j.u8_or("translucency", 2).min(3),
     })
 }
 
@@ -359,11 +363,12 @@ pub fn save_settings(s: &Settings) -> bool {
         return false;
     }
     let json = format!(
-        "{{\"dark\":{},\"defaultRollMode\":{},\"desktopMenu\":{},\"autoUpdate\":{}}}\n",
+        "{{\"dark\":{},\"defaultRollMode\":{},\"desktopMenu\":{},\"autoUpdate\":{},\"translucency\":{}}}\n",
         s.dark,
         s.default_roll_mode.as_u8(),
         s.desktop_menu,
-        s.auto_update
+        s.auto_update,
+        s.translucency
     );
     write_atomic(&settings_path(), &json)
 }

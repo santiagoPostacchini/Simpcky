@@ -144,12 +144,16 @@ pub fn create_note(data: NoteData) -> HWND {
         WS_EX_TOOLWINDOW
     };
 
+    // Modo vidrio: `WS_POPUPWINDOW` (con borde y menú de sistema, que
+    // igual no se ven: ver WM_NCCALCSIZE) es lo que el mod de Windhawk
+    // reconoce como ventana, y lo mira al crearla.
+    let style = if crate::glass::active() { WS_POPUPWINDOW } else { WS_POPUP };
     let hwnd = unsafe {
         CreateWindowExW(
             ex_style,
             class_name.as_ptr(),
             null(),
-            WS_POPUP | WS_VISIBLE | WS_CLIPCHILDREN,
+            style | WS_VISIBLE | WS_CLIPCHILDREN,
             x,
             y,
             data.w,
@@ -613,6 +617,16 @@ fn paint(hwnd: HWND, hdc: HDC) {
         let old_bmp = SelectObject(mem, bmp);
 
         let header_rect = RECT { left: 0, top: 0, right: width, bottom: hh };
+        if let Some((ha, ba)) = crate::glass::opacity() {
+            SelectObject(mem, old_bmp);
+            DeleteObject(bmp);
+            DeleteDC(mem);
+            paint_glass_header(hwnd, hdc, &layout, width, hh, header_color, ink, ha, (pinned, rolled, hot), &title, renaming);
+            if client.bottom > hh {
+                crate::glass::fill(hdc, RECT { left: 0, top: hh, right: width, bottom: client.bottom }, body_color, ba);
+            }
+            return;
+        }
         let brush = CreateSolidBrush(header_color);
         FillRect(mem, &header_rect, brush);
         DeleteObject(brush);
@@ -646,7 +660,7 @@ fn paint(hwnd: HWND, hdc: HDC) {
 
         // El título (el nombre, o la primera línea del texto) se ve
         // siempre en el encabezado, esté enrollada o no.
-        if !renaming && !crate::d2d::draw_title(mem, layout.title_rect, &title, ink, header_color, px(hwnd, 15)) {
+        if !renaming && !crate::d2d::draw_title(mem, layout.title_rect, &title, ink, crate::d2d::Bg::Solid(header_color), px(hwnd, 15)) {
             // Sin DirectWrite (no debería pasar): con GDI, emojis en gris.
             let old_font = SelectObject(mem, header_font(hwnd));
             SetTextColor(mem, ink);
@@ -660,9 +674,7 @@ fn paint(hwnd: HWND, hdc: HDC) {
         // Debajo del encabezado: el margen alrededor del texto (el
         // RichEdit tapa el resto; WS_CLIPCHILDREN evita pisarlo).
         if client.bottom > hh {
-            let body = CreateSolidBrush(body_color);
-            FillRect(hdc, &RECT { left: 0, top: hh, right: width, bottom: client.bottom }, body);
-            DeleteObject(body);
+            fill_body(hdc, RECT { left: 0, top: hh, right: width, bottom: client.bottom }, body_color);
         }
         SelectObject(mem, old_bmp);
         DeleteObject(bmp);
@@ -924,7 +936,11 @@ fn switch_layer_window(hwnd: HWND, to_top: bool) {
         if to_top {
             KillTimer(hwnd, TIMER_DESKTOP_WATCH);
             KillTimer(hwnd, TIMER_PEEK_END);
-            crate::desktop::detach(hwnd);
+            if crate::glass::active() {
+                crate::desktop::disown(hwnd);
+            } else {
+                crate::desktop::detach(hwnd);
+            }
             SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
         } else {
             SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
@@ -1023,7 +1039,11 @@ fn anchor_widget(hwnd: HWND) {
     }
     unsafe {
         KillTimer(hwnd, TIMER_PEEK_END);
-        crate::desktop::anchor(hwnd);
+        if crate::glass::active() {
+            crate::desktop::own(hwnd);
+        } else {
+            crate::desktop::anchor(hwnd);
+        }
         SetTimer(hwnd, TIMER_DESKTOP_WATCH, DESKTOP_WATCH_MS, None);
     }
 }
@@ -1130,7 +1150,11 @@ pub fn open_note(hwnd: HWND) {
                     nr.peeking = true;
                 }
             }
-            crate::desktop::detach(hwnd);
+            // En vidrio ya es de primer nivel: asomarse es solo pasar
+            // adelante (ver WM_WINDOWPOSCHANGING).
+            if !crate::glass::active() {
+                crate::desktop::detach(hwnd);
+            }
         }
         ShowWindow(hwnd, SW_SHOW);
         SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
@@ -1338,6 +1362,7 @@ fn on_create(hwnd: HWND) {
     crate::theme::apply_scrollbars(edit);
     apply_text_padding(edit, w, rc.bottom - rc.top);
     create_tooltips(hwnd);
+    editor::set_glass(edit, crate::glass::opacity().map(|(_, b)| b));
     if rolled && !edit.is_null() {
         unsafe { ShowWindow(edit, SW_HIDE) };
     }
@@ -1426,11 +1451,133 @@ fn on_erase(hwnd: HWND, hdc: HDC) {
         FillRect(hdc, &RECT { bottom: hh.min(rc.bottom), ..rc }, b);
         DeleteObject(b);
         if rc.bottom > hh {
-            let b = CreateSolidBrush(body);
-            FillRect(hdc, &RECT { top: hh, ..rc }, b);
-            DeleteObject(b);
+            fill_body(hdc, RECT { top: hh, ..rc }, body);
         }
     }
+}
+
+/// El cuerpo de la nota en `r` (coordenadas de la nota): liso o, en modo
+/// vidrio, el color con su opacidad sobre el desenfoque de Windhawk.
+fn fill_body(hdc: HDC, r: RECT, body: u32) {
+    unsafe {
+        if let Some((_, ba)) = crate::glass::opacity() {
+            crate::glass::fill(hdc, r, body, ba);
+            return;
+        }
+        let b = CreateSolidBrush(body);
+        FillRect(hdc, &r, b);
+        DeleteObject(b);
+    }
+}
+
+/// El encabezado en modo vidrio: todo sobre un lienzo con alfa (el color
+/// de la nota con su opacidad, los botones y el título), copiado de una.
+#[allow(clippy::too_many_arguments)]
+unsafe fn paint_glass_header(
+    hwnd: HWND,
+    hdc: HDC,
+    layout: &HeaderLayout,
+    width: i32,
+    hh: i32,
+    header_color: u32,
+    ink: u32,
+    alpha: u8,
+    (pinned, rolled, hot): (bool, bool, Option<Hit>),
+    title: &str,
+    renaming: bool,
+) {
+    let Some(c) = crate::glass::Canvas::new(width.max(1), hh) else { return };
+    c.fill(RECT { left: 0, top: 0, right: width, bottom: hh }, header_color, alpha);
+    let center = DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX;
+    if layout.buttons {
+        let mut buttons = vec![
+            (Hit::Add, layout.add, 0xE710u16),
+            (Hit::Pin, layout.pin, if pinned { 0xE842 } else { 0xE718 }),
+            (Hit::More, layout.more, 0xE712),
+        ];
+        if let Some(r) = layout.chevron {
+            buttons.push((Hit::Chevron, r, if rolled { 0xE70D } else { 0xE70E }));
+        }
+        if let Some((_, rect, _)) = buttons.iter().find(|(h, ..)| hot == Some(*h)) {
+            let rect = *rect;
+            c.with_graphics(|g| flyout::fill_round_argb(g, &rect, px(hwnd, 5) as f32, crate::glass::argb(ink, 0x30)));
+        }
+        for (_, rect, glyph) in buttons {
+            c.text(rect, &String::from_utf16_lossy(&[glyph]), flyout::icon_font(-px(hwnd, 15)), ink, center);
+        }
+    }
+    if let Some(r) = layout.warn {
+        c.text(r, &String::from_utf16_lossy(&[0xE7BA]), flyout::icon_font(-px(hwnd, 16)), ink, center);
+    }
+    if !renaming {
+        // Con DirectWrite (emojis en color); si no, texto GDI con su alfa.
+        if !crate::d2d::draw_title(c.dc, layout.title_rect, title, ink, crate::d2d::Bg::Glass(header_color, alpha), px(hwnd, 15)) {
+            c.text(layout.title_rect, title, header_font(hwnd), ink, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_LEFT | DT_NOPREFIX);
+        }
+    }
+    c.blit(hdc, 0, 0);
+}
+
+/// Modo vidrio y widget de escritorio (no siempre encima, no asomada):
+/// su lugar es justo encima del escritorio, debajo de las aplicaciones.
+fn glass_widget(hwnd: HWND) -> bool {
+    if !crate::glass::active() {
+        return false;
+    }
+    let id = note_id(hwnd);
+    app().lock().unwrap().notes.get(&id).is_some_and(|nr| nr.data.layer != Layer::AlwaysOnTop && !nr.peeking)
+}
+
+/// Dónde va un widget en modo vidrio en el orden de las ventanas: encima
+/// de los otros widgets (el que se toca pasa adelante de las demás
+/// notas) pero nunca encima de una aplicación.
+fn widget_slot(hwnd: HWND) -> HWND {
+    let others: Vec<HWND> = {
+        let a = app().lock().unwrap();
+        a.notes
+            .values()
+            .filter(|nr| nr.hwnd != 0 && nr.hwnd != hwnd as isize && nr.data.layer != Layer::AlwaysOnTop && !nr.peeking)
+            .map(|nr| nr.hwnd as HWND)
+            .collect()
+    };
+    unsafe {
+        let mut w = GetTopWindow(null_mut());
+        while !w.is_null() {
+            if others.contains(&w) {
+                let above = GetWindow(w, GW_HWNDPREV);
+                return if above.is_null() { HWND_TOP } else { above };
+            }
+            w = GetWindow(w, GW_HWNDNEXT);
+        }
+    }
+    HWND_BOTTOM
+}
+
+/// Cambió el nivel de transparencia: se repintan (la opacidad de cada
+/// parte, y el texto).
+pub fn refresh_glass() {
+    let list: Vec<(HWND, HWND)> =
+        app().lock().unwrap().notes.values().filter(|nr| nr.hwnd != 0).map(|nr| (nr.hwnd as HWND, nr.edit as HWND)).collect();
+    let body = crate::glass::opacity().map(|(_, b)| b);
+    for (h, edit) in list {
+        if !edit.is_null() {
+            editor::set_glass(edit, body);
+        }
+        unsafe { RedrawWindow(h, null(), null_mut(), RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW) };
+    }
+}
+
+/// Se prendió o apagó el modo vidrio (o apareció o se fue el mod): las
+/// ventanas de las notas son de otra clase (poseídas y con otro estilo, o
+/// hijas del escritorio), y el mod solo las mira al crearlas: se rehacen.
+/// Los datos no se tocan.
+pub fn recreate_all() {
+    flush_all();
+    let list: Vec<HWND> = app().lock().unwrap().notes.values().map(|nr| nr.hwnd as HWND).filter(|h| !h.is_null()).collect();
+    for h in list {
+        unsafe { DestroyWindow(h) };
+    }
+    recreate_lost();
 }
 
 /// Fin de un arrastre o de un resize (WM_EXITSIZEMOVE cubre ambos).
@@ -1813,9 +1960,19 @@ fn on_timer(hwnd: HWND, wparam: WPARAM) {
             // tocar nada). Ahora solo toca algo si de verdad se
             // desancló (por ejemplo, `explorer.exe` se reinició) — y
             // nunca mientras la nota está "asomada" al frente.
-            if !is_peeking(hwnd) && !crate::desktop::is_anchored(hwnd) {
+            let layer_top = {
+                let id = note_id(hwnd);
+                app().lock().unwrap().notes.get(&id).is_some_and(|nr| nr.data.layer == Layer::AlwaysOnTop)
+            };
+            if crate::glass::active() {
+                if !layer_top && !is_peeking(hwnd) && !crate::desktop::is_owned(hwnd) {
+                    crate::desktop::own(hwnd);
+                }
+            } else if !is_peeking(hwnd) && !crate::desktop::is_anchored(hwnd) {
                 crate::desktop::anchor(hwnd);
             }
+            // ¿Se prendió o se apagó el mod de Windhawk?
+            crate::tray::check_glass_soon();
         }
         TIMER_PEEK_END => {
             unsafe { KillTimer(hwnd, TIMER_PEEK_END) };
@@ -1873,6 +2030,18 @@ pub unsafe extern "system" fn note_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM,
         WM_STYLECHANGED => {
             if wparam as i32 == GWL_STYLE {
                 update_shape(hwnd);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        // Modo vidrio: el borde de `WS_POPUPWINDOW` no se dibuja, todo es
+        // área de la nota.
+        WM_NCCALCSIZE if wparam != 0 && GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & WS_BORDER != 0 => 0,
+        // Modo vidrio: un widget se queda sobre el escritorio aunque lo
+        // activen (si no, un clic lo pasaba adelante de las aplicaciones).
+        WM_WINDOWPOSCHANGING => {
+            let wp = &mut *(lparam as *mut WINDOWPOS);
+            if wp.flags & SWP_NOZORDER == 0 && glass_widget(hwnd) {
+                wp.hwndInsertAfter = widget_slot(hwnd);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }

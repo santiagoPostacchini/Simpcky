@@ -29,7 +29,7 @@ cargo build --release
 En debug (`cargo run`) el binario abre una consola detrás; en release no
 (`#![windows_subsystem = "windows"]`).
 
-## Estado actual (v0.4)
+## Estado actual (v0.4.1)
 
 Ya funciona:
 
@@ -79,6 +79,20 @@ Ya funciona:
   DirectWrite.
 - **Escala**: encabezado, botones, márgenes y menús siguen los ppp del
   monitor (a 150 % antes todo quedaba chico).
+- **Transparencia con Windhawk** (`glass.rs`): con el mod "Translucent
+  Windows" de Windhawk activo, las notas toman su desenfoque, como el
+  resto de las aplicaciones. El mod solo toca ventanas de primer nivel con
+  estilo de ventana (`WS_POPUPWINDOW`), y al crearlas; una nota anclada es
+  hija del escritorio. Así que en este modo las notas del escritorio son
+  ventanas de primer nivel **poseídas** por el escritorio: Windows las
+  mantiene justo encima de él (detrás de las aplicaciones, visibles con
+  "Mostrar escritorio"), y al activarlas no pasan adelante de ninguna
+  aplicación (`WM_WINDOWPOSCHANGING`). Se pintan con alfa de verdad: el
+  color de la nota premultiplicado en un DIB de 32 bits, porque GDI
+  escribe alfa 0 y el compositor mostraría ese color aclarado. Los íconos
+  van con una máscara propia; el texto del RichEdit lo recompone el mod.
+  Intensidad en la bandeja → Transparencia con Windhawk. Sin el mod, las
+  notas vuelven solas a ancladas y lisas.
 - **Barra de desplazamiento fina**, del color de la nota: la de Windows
   queda recortada fuera de la vista y se dibuja una rayita que se
   ensancha con el mouse y se arrastra.
@@ -265,6 +279,8 @@ se vería pero no se podría escribir ni arrastrar.
   formato, íconos de Segoe Fluent Icons).
 - `src/d2d.rs` — Direct2D/DirectWrite a mano (emojis y títulos en
   color).
+- `src/glass.rs` — modo vidrio para el mod de Windhawk: detección del
+  mod y lienzo con alfa premultiplicado.
 - `src/desktop.rs` — anclar una nota al escritorio (el padre de los
   íconos).
 - `src/allnotes.rs` — ventana "Todas las notas": buscador y grilla de

@@ -229,6 +229,9 @@ struct EditState {
     bar_hover: bool,
     /// Arrastrando la barra: a qué altura del pulgar se lo agarró.
     bar_drag: Option<i32>,
+    /// Modo vidrio (ver `glass.rs`): opacidad del color de la nota sobre
+    /// el desenfoque de Windhawk. `None`: liso.
+    glass: Option<u8>,
 }
 
 /// Temporizador del RichEdit para acomodar la presentación un momento
@@ -255,7 +258,9 @@ pub fn create(parent: HWND, hinstance: HINSTANCE, id: usize, rc: RECT) -> HWND {
     let class = wide("RICHEDIT50W");
     unsafe {
         let edit = CreateWindowExW(
-            0,
+            // Transparente: el RichEdit pinta solo el texto, y el fondo lo
+            // pone `paint_background` (liso, o translúcido en modo vidrio).
+            WS_EX_TRANSPARENT,
             class.as_ptr(),
             null(),
             WS_CHILD
@@ -306,6 +311,7 @@ pub fn create(parent: HWND, hinstance: HINSTANCE, id: usize, rc: RECT) -> HWND {
                     emojis: Vec::new(),
                     bar_hover: false,
                     bar_drag: None,
+                    glass: None,
                 })
         });
         SetWindowSubclass(edit, Some(subclass_proc), 1, 0);
@@ -1145,23 +1151,35 @@ unsafe fn paint_bar(edit: HWND) {
     let (strip, bar) = bar(edit);
     let (ink, body) = colors(edit);
     let hdc = GetDC(edit);
-    let brush = CreateSolidBrush(body);
-    FillRect(hdc, &strip, brush);
-    DeleteObject(brush);
-    if let Some(b) = bar {
+    let thumb = bar.map(|b| {
         let (hover, drag) = with_state(edit, |s| (s.bar_hover, s.bar_drag.is_some())).unwrap_or((false, false));
         let wide = hover || drag;
         let w = if wide { scale(edit, 6) } else { scale(edit, 3) };
         let cx = b.strip.right - scale(edit, 8);
         let r = RECT { left: cx - w / 2, top: b.thumb.top, right: cx - w / 2 + w, bottom: b.thumb.bottom };
-        let mix = |sh: u32, a: u32| (((ink >> sh) & 0xff) * a + ((body >> sh) & 0xff) * (100 - a)) / 100;
-        let a = if wide { 60 } else { 35 };
-        let color = mix(0, a) | (mix(8, a) << 8) | (mix(16, a) << 16);
-        let mut g: *mut GpGraphics = null_mut();
-        if GdipCreateFromHDC(hdc, &mut g) == Ok && !g.is_null() {
-            GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
-            flyout::fill_round(g, &r, w as f32 / 2.0, color);
-            GdipDeleteGraphics(g);
+        (r, w, if wide { 60u32 } else { 35 })
+    });
+    if let Some(alpha) = glass(edit) {
+        // Vidrio: la franja y el pulgar sobre un lienzo con alfa.
+        if let Some(c) = crate::glass::Canvas::new(strip.right - strip.left, strip.bottom - strip.top) {
+            c.fill(RECT { left: 0, top: 0, right: strip.right - strip.left, bottom: strip.bottom - strip.top }, body, alpha);
+            if let Some((r, w, a)) = thumb {
+                let r = RECT { left: r.left - strip.left, right: r.right - strip.left, ..r };
+                c.with_graphics(|g| flyout::fill_round_argb(g, &r, w as f32 / 2.0, crate::glass::argb(ink, (a * 255 / 100) as u8)));
+            }
+            c.blit(hdc, strip.left, strip.top);
+        }
+    } else {
+        fill_bg(edit, hdc, strip);
+        if let Some((r, w, a)) = thumb {
+            let mix = |sh: u32| (((ink >> sh) & 0xff) * a + ((body >> sh) & 0xff) * (100 - a)) / 100;
+            let color = mix(0) | (mix(8) << 8) | (mix(16) << 16);
+            let mut g: *mut GpGraphics = null_mut();
+            if GdipCreateFromHDC(hdc, &mut g) == Ok && !g.is_null() {
+                GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
+                flyout::fill_round(g, &r, w as f32 / 2.0, color);
+                GdipDeleteGraphics(g);
+            }
         }
     }
     ReleaseDC(edit, hdc);
@@ -1231,7 +1249,22 @@ unsafe fn paint_marks(edit: HWND) {
                 let cover = if pe.y == p0.y && pe.x > right { pe.x } else { right };
                 let bottom = line_bottom(edit, a, p0.y);
                 let glyph = RECT { left: p0.x, top: p0.y, right, bottom };
-                draw_checkbox(g, hdc, glyph, cover, em, done, ink, body);
+                match glass(edit) {
+                    Some(alpha) => {
+                        // Vidrio: la casilla sobre un lienzo con alfa.
+                        let area = RECT { right: cover, ..glyph };
+                        if let Some(c) = crate::glass::Canvas::new(area.right - area.left, area.bottom - area.top) {
+                            c.fill(RECT { left: 0, top: 0, right: area.right - area.left, bottom: area.bottom - area.top }, body, alpha);
+                            let local = RECT { left: 0, top: 0, right: right - area.left, bottom: area.bottom - area.top };
+                            c.with_graphics(|cg| draw_checkbox(cg, local, em, done, ink, body));
+                            c.blit(hdc, area.left, area.top);
+                        }
+                    }
+                    None => {
+                        fill_bg(edit, hdc, RECT { right: cover, ..glyph });
+                        draw_checkbox(g, glyph, em, done, ink, body);
+                    }
+                }
             }
             GdipDeleteGraphics(g);
         }
@@ -1247,7 +1280,13 @@ unsafe fn paint_marks(edit: HWND) {
         let p1 = pos(edit, b);
         let right = if p1.y == p0.y && p1.x > p0.x { p1.x } else { p0.x + em * 5 / 4 };
         let cell = RECT { left: p0.x, top: p0.y, right, bottom: line_bottom(edit, a, p0.y) };
-        let bg = if selected_visible && a >= s && b <= e { GetSysColor(COLOR_HIGHLIGHT) } else { body };
+        let bg = if selected_visible && a >= s && b <= e {
+            crate::d2d::Bg::Solid(GetSysColor(COLOR_HIGHLIGHT))
+        } else if let Some(alpha) = glass(edit) {
+            crate::d2d::Bg::Glass(body, alpha)
+        } else {
+            crate::d2d::Bg::Solid(body)
+        };
         crate::d2d::draw_emoji(hdc, cell, clip, &text[a..b], em as u32, bg);
     }
 
@@ -1273,13 +1312,10 @@ unsafe fn paint_placeholder(edit: HWND) {
     ReleaseDC(edit, hdc);
 }
 
-/// Una casilla redondeada en lugar del ☐/☑ de la fuente: contorno
-/// suave si está pendiente, llena y con tilde si está hecha. `cover`:
-/// hasta dónde tapar a la derecha (la marca y el espacio que la sigue).
-unsafe fn draw_checkbox(g: *mut GpGraphics, hdc: HDC, cell: RECT, cover: i32, em: i32, done: bool, ink: u32, body: u32) {
-    let brush = CreateSolidBrush(body);
-    FillRect(hdc, &RECT { right: cover, ..cell }, brush);
-    DeleteObject(brush);
+/// Una casilla redondeada en lugar del ☐/☑ de la fuente, centrada en
+/// `cell`: contorno suave si está pendiente, llena y con tilde si está
+/// hecha. (El fondo de abajo ya está pintado.)
+unsafe fn draw_checkbox(g: *mut GpGraphics, cell: RECT, em: i32, done: bool, ink: u32, body: u32) {
     let size = (em * 7 / 8) as f32;
     let cx = (cell.left + cell.right) as f32 / 2.0;
     let cy = (cell.top + cell.bottom) as f32 / 2.0;
@@ -1330,10 +1366,12 @@ fn ctrl() -> bool {
 unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _id: usize, _data: usize) -> LRESULT {
     match msg {
         WM_PAINT => {
+            paint_background(edit);
             let r = DefSubclassProc(edit, msg, wparam, lparam);
             paint_overlay(edit);
             r
         }
+        WM_ERASEBKGND => 1,
         WM_KEYUP | WM_IME_CHAR | WM_IME_COMPOSITION | WM_UNDO | WM_CUT | WM_CLEAR => {
             let r = DefSubclassProc(edit, msg, wparam, lparam);
             paint_overlay(edit);
@@ -1525,6 +1563,45 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
         }
         _ => DefSubclassProc(edit, msg, wparam, lparam),
     }
+}
+
+/// Modo vidrio para el texto: la opacidad del color de la nota sobre el
+/// desenfoque de Windhawk, o `None` para liso.
+pub fn set_glass(edit: HWND, opacity: Option<u8>) {
+    with_state(edit, |s| s.glass = opacity);
+    unsafe { InvalidateRect(edit, null(), 0) };
+}
+
+fn glass(edit: HWND) -> Option<u8> {
+    with_state(edit, |s| s.glass).flatten()
+}
+
+/// El fondo del texto en `r` (coordenadas del RichEdit).
+unsafe fn fill_bg(edit: HWND, hdc: HDC, r: RECT) {
+    let (_, body) = colors(edit);
+    if let Some(alpha) = glass(edit) {
+        crate::glass::fill(hdc, r, body, alpha);
+        return;
+    }
+    let brush = CreateSolidBrush(body);
+    FillRect(hdc, &r, brush);
+    DeleteObject(brush);
+}
+
+/// Antes de que el RichEdit pinte (solo texto: es transparente), el fondo
+/// de lo que va a repintar.
+unsafe fn paint_background(edit: HWND) {
+    let rgn = CreateRectRgn(0, 0, 0, 0);
+    let kind = GetUpdateRgn(edit, rgn, 0);
+    if kind != NULLREGION && kind != RGN_ERROR {
+        let hdc = GetDC(edit);
+        SelectClipRgn(hdc, rgn);
+        let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        GetClientRect(edit, &mut rc);
+        fill_bg(edit, hdc, rc);
+        ReleaseDC(edit, hdc);
+    }
+    DeleteObject(rgn);
 }
 
 /// Márgenes internos del texto.

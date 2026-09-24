@@ -197,6 +197,38 @@ pub fn is_desktop_visible_at(x: i32, y: i32) -> bool {
     }
 }
 
+/// Modo vidrio (ver `glass.rs`): en vez de hija, la nota es una ventana
+/// de primer nivel **poseída** por el contenedor de los íconos. Windows
+/// mantiene a las poseídas encima de su dueño: queda justo sobre el
+/// escritorio, detrás de las aplicaciones, y visible con "Mostrar
+/// escritorio" (comprobado en Windows 11 24H2). Y como es de primer nivel,
+/// el mod de Windhawk le puede poner su desenfoque.
+pub fn own(hwnd: HWND) -> bool {
+    let host = find_host();
+    if host.is_null() {
+        return false;
+    }
+    unsafe {
+        if GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & WS_CHILD != 0 {
+            detach(hwnd);
+        }
+        SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, host as isize);
+        SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+    true
+}
+
+/// `true` si `hwnd` está poseída por el contenedor de íconos de ahora.
+pub fn is_owned(hwnd: HWND) -> bool {
+    let host = find_host();
+    !host.is_null() && unsafe { GetWindow(hwnd, GW_OWNER) } == host
+}
+
+/// Deja de estar poseída por el escritorio (para "siempre encima").
+pub fn disown(hwnd: HWND) {
+    unsafe { SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0) };
+}
+
 /// Deshace el anclaje: la nota vuelve a ser una ventana normal del
 /// escritorio (sin padre ni WS_CHILD), en la misma posición de
 /// pantalla en la que estaba, traída al frente para que no quede

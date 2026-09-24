@@ -1,6 +1,6 @@
 [package]
 name = "simpcky"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 description = "Notas adhesivas ultraligeras para el escritorio de Windows"
 license = "MIT"
@@ -28,6 +28,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_Security",
     "Win32_UI_HiDpi",
     "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
     "Win32_Networking_WinHttp",
     "Win32_Security_Cryptography",
 ] }

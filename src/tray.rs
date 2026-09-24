@@ -43,6 +43,25 @@ const TIMER_RECREATE: usize = 1;
 /// Las notas no se pudieron guardar (ver `app::save_all`): wParam 1 si
 /// empezó a fallar, 0 si volvió a andar.
 pub const WM_APP_SAVE_STATE: u32 = WM_APP + 6;
+/// Mirar si el mod de Windhawk se prendió o se apagó (ver `glass.rs`).
+const WM_APP_GLASS_CHECK: u32 = WM_APP + 7;
+
+/// Que se mire, en cola y no más de una vez cada unos segundos (lo piden
+/// los vigilantes de todas las notas).
+pub fn check_glass_soon() {
+    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    {
+        let mut last = LAST.lock().unwrap();
+        if last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(3)) {
+            return;
+        }
+        *last = Some(std::time::Instant::now());
+    }
+    let hwnd = app().lock().unwrap().controller_hwnd as HWND;
+    if !hwnd.is_null() {
+        unsafe { PostMessageW(hwnd, WM_APP_GLASS_CHECK, 0, 0) };
+    }
+}
 /// Mientras no se puede guardar, se reintenta solo.
 const TIMER_SAVE_RETRY: usize = 40;
 const SAVE_RETRY_MS: u32 = 30_000;
@@ -63,6 +82,8 @@ const ID_UPDATE_INSTALL: u32 = 1020;
 const ID_UPDATE_CHECK: u32 = 1021;
 const ID_UPDATE_AUTO: u32 = 1022;
 const ID_SAVE_RETRY: u32 = 1030;
+/// "Transparencia con Windhawk": + 0 (apagada) … 3 (fuerte).
+const ID_TRANSLUCENCY: u32 = 1040;
 
 fn taskbar_created_msg() -> u32 {
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -369,6 +390,20 @@ fn show_tray_menu(hwnd: HWND) {
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
 
         append_check(menu, ID_DARK_MODE, "Modo oscuro", crate::theme::is_dark());
+        let level = app().lock().unwrap().settings.translucency;
+        let sub = CreatePopupMenu();
+        for (i, name) in ["Apagada", "Suave", "Media", "Fuerte"].iter().enumerate() {
+            let label = wide(name);
+            AppendMenuW(sub, MF_STRING, (ID_TRANSLUCENCY + i as u32) as usize, label.as_ptr());
+            note::mark_radio(sub, ID_TRANSLUCENCY + i as u32, level as usize == i);
+        }
+        if !crate::glass::mod_loaded() {
+            AppendMenuW(sub, MF_SEPARATOR, 0, null());
+            let hint = wide("Se ve con el mod \"Translucent Windows\" de Windhawk (no está activo)");
+            AppendMenuW(sub, MF_STRING | MF_DISABLED | MF_GRAYED, 0, hint.as_ptr());
+        }
+        let sub_label = wide("Transparencia con Windhawk");
+        AppendMenuW(menu, MF_POPUP, sub as usize, sub_label.as_ptr());
         append_check(menu, ID_DESKTOP_MENU, "\"Nueva nota\" en el clic derecho del escritorio", desktop_menu);
         append_check(menu, ID_AUTOSTART, "Iniciar con Windows", autostart_on);
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
@@ -474,6 +509,15 @@ fn handle_command(hwnd: HWND, id: u32) {
         ID_UPDATE_CHECK => crate::update::check_now(),
         ID_UPDATE_AUTO => crate::update::toggle_auto(),
         ID_SAVE_RETRY => crate::app::save_all(),
+        id if (ID_TRANSLUCENCY..ID_TRANSLUCENCY + 4).contains(&id) => {
+            app().lock().unwrap().settings.translucency = (id - ID_TRANSLUCENCY) as u8;
+            crate::app::save_settings();
+            if crate::glass::update() {
+                note::recreate_all();
+            } else {
+                note::refresh_glass();
+            }
+        }
         _ => {}
     }
 }
@@ -543,6 +587,12 @@ unsafe extern "system" fn controller_wndproc(hwnd: HWND, msg: u32, wparam: WPARA
         }
         WM_TIMER if wparam == crate::sync::TIMER_SYNC_SOON || wparam == crate::sync::TIMER_SYNC_POLL => {
             crate::sync::on_timer(wparam);
+            0
+        }
+        WM_APP_GLASS_CHECK => {
+            if crate::glass::update() {
+                note::recreate_all();
+            }
             0
         }
         WM_APP_SAVE_STATE => {

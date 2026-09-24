@@ -67,7 +67,18 @@ struct ColorF {
 const D2D1_FACTORY_TYPE_SINGLE_THREADED: u32 = 0;
 const D2D1_RENDER_TARGET_TYPE_SOFTWARE: u32 = 1; // áreas chiquitas: más rápido que ir y volver de la GPU
 const DXGI_FORMAT_B8G8R8A8_UNORM: u32 = 87;
+const D2D1_ALPHA_MODE_PREMULTIPLIED: u32 = 1;
 const D2D1_ALPHA_MODE_IGNORE: u32 = 3;
+const D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE: u32 = 2;
+
+/// Fondo de lo que se dibuja: liso (y el texto con ClearType), o el color
+/// de la nota con opacidad, para el modo vidrio de `glass.rs` (ahí el
+/// alfa llega tal cual a la ventana, y el desenfoque lo pone Windhawk).
+#[derive(Clone, Copy)]
+pub enum Bg {
+    Solid(u32),
+    Glass(u32, u8),
+}
 const D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT: u32 = 4;
 const DWRITE_FACTORY_TYPE_SHARED: u32 = 0;
 const DWRITE_FONT_WEIGHT_NORMAL: u32 = 400;
@@ -105,7 +116,9 @@ unsafe fn release(obj: *mut c_void) {
 type Key = (&'static str, u32, u32, bool);
 
 struct Emoji {
-    target: *mut c_void, // ID2D1DCRenderTarget
+    target: *mut c_void, // ID2D1DCRenderTarget, opaco
+    /// Otro, con alfa premultiplicado, para `Bg::Glass`.
+    glass: *mut c_void,
     dwrite: *mut c_void, // IDWriteFactory
     formats: Vec<(Key, *mut c_void)>, // IDWriteTextFormat
 }
@@ -134,16 +147,28 @@ unsafe fn create() -> Option<Emoji> {
     // ID2D1Factory::CreateDCRenderTarget
     let create_dc: unsafe extern "system" fn(*mut c_void, *const RenderTargetProperties, *mut *mut c_void) -> i32 = method(factory, 16);
     let ok = create_dc(factory, &props, &mut target) >= 0;
-    release(factory); // el render target se queda con su propia referencia
-    if !ok {
+    let props_glass = RenderTargetProperties {
+        pixel_format: PixelFormat { format: DXGI_FORMAT_B8G8R8A8_UNORM, alpha_mode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+        ..props
+    };
+    let mut glass: *mut c_void = null_mut();
+    create_dc(factory, &props_glass, &mut glass);
+    release(factory); // los render targets se quedan con su propia referencia
+    if !ok || glass.is_null() {
+        release(target);
+        release(glass);
         return None;
     }
+    // ClearType necesita fondo opaco: sobre vidrio, suavizado en gris.
+    let set_aa: unsafe extern "system" fn(*mut c_void, u32) = method(glass, 34);
+    set_aa(glass, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     let mut dwrite: *mut c_void = null_mut();
     if DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, &IID_IDWRITE_FACTORY, &mut dwrite) < 0 {
         release(target);
+        release(glass);
         return None;
     }
-    Some(Emoji { target, dwrite, formats: Vec::new() })
+    Some(Emoji { target, glass, dwrite, formats: Vec::new() })
 }
 
 unsafe fn text_format(e: &mut Emoji, key: Key) -> *mut c_void {
@@ -207,18 +232,18 @@ fn color(c: u32) -> ColorF {
 /// liso `bg` que tapa lo que había (el emoji en blanco y negro del
 /// RichEdit). Solo se dibuja la parte de `cell` que cae dentro de
 /// `clip`. `false` si no se pudo (y entonces queda lo que había).
-pub fn draw_emoji(hdc: HDC, cell: RECT, clip: RECT, text: &[u16], size_px: u32, bg: u32) -> bool {
+pub fn draw_emoji(hdc: HDC, cell: RECT, clip: RECT, text: &[u16], size_px: u32, bg: Bg) -> bool {
     draw(hdc, cell, clip, text, ("Segoe UI Emoji", DWRITE_FONT_WEIGHT_NORMAL, size_px * 10, true), 0, bg)
 }
 
 /// El título de una nota, en semibold, con "…" si no entra y los emojis
 /// en color (con GDI salían en gris, al lado de los del texto en color).
-pub fn draw_title(hdc: HDC, rect: RECT, text: &str, ink: u32, bg: u32, size_px: i32) -> bool {
+pub fn draw_title(hdc: HDC, rect: RECT, text: &str, ink: u32, bg: Bg, size_px: i32) -> bool {
     let w: Vec<u16> = text.encode_utf16().collect();
     draw(hdc, rect, rect, &w, ("Segoe UI", DWRITE_FONT_WEIGHT_SEMIBOLD, size_px.max(1) as u32 * 10, false), ink, bg)
 }
 
-fn draw(hdc: HDC, cell: RECT, clip: RECT, text: &[u16], key: Key, fg: u32, bg: u32) -> bool {
+fn draw(hdc: HDC, cell: RECT, clip: RECT, text: &[u16], key: Key, fg: u32, bg: Bg) -> bool {
     let bound = RECT {
         left: cell.left.max(clip.left),
         top: cell.top.max(clip.top),
@@ -238,7 +263,10 @@ fn draw(hdc: HDC, cell: RECT, clip: RECT, text: &[u16], key: Key, fg: u32, bg: u
         if format.is_null() {
             return false;
         }
-        let rt = e.target;
+        let (rt, bg_color, bg_alpha) = match bg {
+            Bg::Solid(c) => (e.target, c, 1.0),
+            Bg::Glass(c, a) => (e.glass, c, a as f32 / 255.0),
+        };
         // ID2D1DCRenderTarget::BindDC — al rectángulo que se ve, así lo
         // que quede afuera no se toca.
         let bind: unsafe extern "system" fn(*mut c_void, HDC, *const RECT) -> i32 = method(rt, 57);
@@ -249,7 +277,7 @@ fn draw(hdc: HDC, cell: RECT, clip: RECT, text: &[u16], key: Key, fg: u32, bg: u
         let mut fg_brush: *mut c_void = null_mut();
         // ID2D1RenderTarget::CreateSolidColorBrush
         let brush: unsafe extern "system" fn(*mut c_void, *const ColorF, *const c_void, *mut *mut c_void) -> i32 = method(rt, 8);
-        brush(rt, &color(bg), std::ptr::null(), &mut bg_brush);
+        brush(rt, &ColorF { a: bg_alpha, ..color(bg_color) }, std::ptr::null(), &mut bg_brush);
         brush(rt, &color(fg), std::ptr::null(), &mut fg_brush);
         if bg_brush.is_null() || fg_brush.is_null() {
             release(bg_brush);
@@ -271,6 +299,12 @@ fn draw(hdc: HDC, cell: RECT, clip: RECT, text: &[u16], key: Key, fg: u32, bg: u
             method(rt, 27);
         let end: unsafe extern "system" fn(*mut c_void, *mut u64, *mut u64) -> i32 = method(rt, 49);
         begin(rt);
+        if matches!(bg, Bg::Glass(..)) {
+            // ID2D1RenderTarget::Clear, transparente: el color va encima con
+            // su opacidad, y lo de atrás lo pone el desenfoque.
+            let clear: unsafe extern "system" fn(*mut c_void, *const ColorF) = method(rt, 47);
+            clear(rt, &ColorF { r: 0.0, g: 0.0, b: 0.0, a: 0.0 });
+        }
         fill(rt, &whole, bg_brush);
         draw_text(
             rt,
@@ -292,6 +326,7 @@ fn draw(hdc: HDC, cell: RECT, clip: RECT, text: &[u16], key: Key, fg: u32, bg: u
                 release(f);
             }
             release(e.target);
+            release(e.glass);
             release(e.dwrite);
             *state = None;
             return false;
