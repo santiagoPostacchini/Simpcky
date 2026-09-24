@@ -1,6 +1,6 @@
 [package]
 name = "simpcky"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Notas adhesivas ultraligeras para el escritorio de Windows"
 license = "MIT"

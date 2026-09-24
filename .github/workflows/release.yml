@@ -136,12 +136,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $site = "https://santiagopostacchini.github.io/Simpcky"
+          # Qué cambió en esta versión, si alguien lo escribió.
+          $extra = ".github/release-notes/$env:VERSION.md"
+          $cambios = if (Test-Path $extra) { (Get-Content $extra -Raw -Encoding utf8) + "`n" } else { "" }
           $firma = if ($env:SIGN -eq 'true') {
             "Firmado con firma de código gratuita de [SignPath.io](https://about.signpath.io/), certificado de [SignPath Foundation](https://signpath.org/)."
           } else {
             "Esta versión no está firmada digitalmente: Windows puede mostrar ""Windows protegió tu PC"" (*Más información* → *Ejecutar de todas formas*)."
           }
           @"
+          $cambios
           **Instalar:** bajá ``Simpcky-Setup-$env:VERSION.exe`` y abrilo. Las copias ya instaladas se actualizan solas.
 
           $firma [Política de firma de código]($site/firma.html) · [Privacidad]($site/privacidad.html)

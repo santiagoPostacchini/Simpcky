@@ -15,7 +15,7 @@ La política que exige SignPath ya está publicada:
 ## 1. Antes de pedirlo
 
 - **Una versión publicada.** SignPath exige que el proyecto ya esté
-  publicado en la forma que se va a firmar: la 0.3.0 (sin firmar) cumple.
+  publicado en la forma que se va a firmar: la 0.4.0 (sin firmar) cumple.
 - **Verificación en dos pasos en GitHub**:
   <https://github.com/settings/security> → *Two-factor authentication*.
   SignPath la exige para todo el equipo.

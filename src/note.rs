@@ -1387,6 +1387,30 @@ fn on_size(hwnd: HWND, lparam: LPARAM) {
     unsafe { RedrawWindow(hwnd, null(), null_mut(), RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_ALLCHILDREN) };
 }
 
+/// Esquinas redondeadas. Suelta (siempre encima, o asomada), las pone
+/// Windows 11 (`DWMWCP_ROUND`, con borde suave y sombra); pero Windows
+/// solo redondea ventanas de primer nivel, y anclada al escritorio la nota
+/// es hija de Progman: ahí se recorta con una región, con el mismo radio
+/// de 8 px (el borde queda un poco más escalonado que el de Windows).
+fn update_shape(hwnd: HWND) {
+    unsafe {
+        let child = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & WS_CHILD != 0;
+        if !child {
+            let mut box_ = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            if GetWindowRgnBox(hwnd, &mut box_) != 0 {
+                SetWindowRgn(hwnd, null_mut(), 1);
+            }
+            return;
+        }
+        let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        GetWindowRect(hwnd, &mut rc);
+        let d = px(hwnd, 16);
+        // El sistema se queda con la región: no se borra acá.
+        let rgn = CreateRoundRectRgn(0, 0, rc.right - rc.left + 1, rc.bottom - rc.top + 1, d, d);
+        SetWindowRgn(hwnd, rgn, 1);
+    }
+}
+
 /// El fondo, con los colores de la nota (encabezado y cuerpo): lo que se
 /// vea antes de que llegue el dibujo de verdad tiene que ser la nota, no
 /// un rectángulo blanco.
@@ -1841,8 +1865,16 @@ pub unsafe extern "system" fn note_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM,
             1
         }
         WM_SIZE => {
+            update_shape(hwnd);
             on_size(hwnd, lparam);
             0
+        }
+        // Se ancló al escritorio o se soltó (SetParent + WS_CHILD).
+        WM_STYLECHANGED => {
+            if wparam as i32 == GWL_STYLE {
+                update_shape(hwnd);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_LBUTTONDOWN => {
             on_lbuttondown(hwnd, lparam);

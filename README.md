@@ -29,7 +29,7 @@ cargo build --release
 En debug (`cargo run`) el binario abre una consola detrás; en release no
 (`#![windows_subsystem = "windows"]`).
 
-## Estado actual (v0.3)
+## Estado actual (v0.4)
 
 Ya funciona:
 
@@ -41,7 +41,7 @@ Ya funciona:
   encima). El valor por defecto para notas nuevas se cambia desde el
   menú de la bandeja.
 - Cada nota es, por defecto, un **widget de escritorio**: anclada
-  dentro del escritorio vía el truco de la `WorkerW`/`Progman`, hija de
+  dentro de la ventana que contiene los íconos del escritorio, hija de
   verdad (`WS_CHILD`, no un `WS_POPUP` "poseído" — si no, se esconde
   sola al hacer clic en el escritorio), **en capas** (`WS_EX_LAYERED`,
   sin eso en Windows 11 24H2+ no se dibuja: ver abajo), arriba de la
@@ -49,19 +49,49 @@ Ya funciona:
   padre correctamente convertidas, con vigilancia cada 4 s por si
   `explorer.exe` se reinicia (pero solo actúa si de verdad hace falta:
   reanclar sin necesidad corta el foco de lo que estés escribiendo).
-  Así sobrevive a "Mostrar escritorio". Desde el menú "⋯" → Capa, o con
-  un clic en el pin del encabezado, se puede pasar a **Siempre
-  encima**: ahí se convierte en una ventana normal, con botón en la
-  barra de tareas y por encima de todo.
+  Así sobrevive a "Mostrar escritorio". Con el pin del encabezado (o
+  "⋯" → Siempre encima) se convierte en una ventana normal, con botón en
+  la barra de tareas y por encima de todo.
+- **Encabezado**: el título, y los botones (nota nueva, siempre encima,
+  enrollar, "⋯") solo con el mouse encima o mientras se escribe, con
+  ayudas al posar el mouse. Arrastrar la barra mueve la nota; un clic
+  suelto ya no la enrolla (para eso está el botón y `Ctrl+R`).
+- **Menú "⋯" propio** (`flyout.rs`, al estilo de Windows 11): los seis
+  colores como muestras — el único lugar donde se elige el color —,
+  siempre encima, enrollado automático, cambiar nombre, duplicar, todas
+  las notas y eliminar. No toma el foco: la nota sigue activa.
+- **Texto con formato** (`editor.rs`): clic derecho sobre el texto para
+  negrita, cursiva, subrayado y tachado (o `Ctrl+B/I/U/T`), cortar,
+  copiar, pegar y emojis. Lo pegado toma la letra y los colores de la
+  nota. El formato se guarda aparte del texto (`fmt`, ver
+  `richtext.rs`), en una forma canónica: no RTF, que cada versión de
+  Windows escribe distinto y haría que dos compus se pasaran la misma
+  nota "arreglándola" para siempre.
+- **Listas de tareas y viñetas**: `[] ` o `- ` al comienzo de una línea
+  (o el clic derecho, o `Ctrl+Shift+C` / `Ctrl+Shift+L`). La marca vive
+  en el texto (`☐ `, `☑ `, `• `), así que una versión vieja o un copiar y
+  pegar la siguen mostrando. Clic en la casilla para tildar (queda en
+  gris y tachada), Enter sigue la lista, Enter en un ítem vacío o
+  Retroceso junto a la marca la terminan.
+- **Emojis en color**: el RichEdit de Windows los dibuja con GDI, en
+  blanco y negro; se repintan encima con Direct2D/DirectWrite
+  (`d2d.rs`), igual que las casillas (GDI+). El título también va con
+  DirectWrite.
+- **Escala**: encabezado, botones, márgenes y menús siguen los ppp del
+  monitor (a 150 % antes todo quedaba chico).
+- **Barra de desplazamiento fina**, del color de la nota: la de Windows
+  queda recortada fuera de la vista y se dibuja una rayita que se
+  ensancha con el mouse y se arrastra.
+- **Si no se puede guardar**, avisa: una notificación, un ícono en la
+  barra de cada nota y un ítem en el menú de la bandeja, y reintenta
+  solo cada 30 s. (Un antivirus corporativo llegó a bloquearle la
+  escritura a Simpcky durante horas sin que nada se enterara.)
 - **Nombre propio** para cada nota, siempre visible en el encabezado.
   Sin nombre, muestra la primera línea del texto (y si está vacía,
   "Nota"). **Doble clic en el título**, `F2`, o "⋯" → Cambiar nombre
   abre un cuadro ahí mismo con el nombre seleccionado — como renombrar
   un archivo en el Explorador. Enter confirma, Esc cancela; dejarlo
-  vacío vuelve al nombre automático. El chevron enrolla/desenrolla; el
-  resto de la barra arrastra la ventana, y un clic sin mover el mouse
-  (expandida) la enrolla — pero recién pasado el tiempo de doble clic,
-  para que el doble clic de renombrar no la enrolle antes.
+  vacío vuelve al nombre automático.
 - **Redimensionable** desde cualquier borde o esquina (vía
   `WM_NCHITTEST`, sin necesidad de `WS_THICKFRAME`), con un tamaño
   mínimo razonable. Deshabilitado mientras está enrollada.
@@ -71,9 +101,6 @@ Ya funciona:
   `rc.exe` ni dependencias), así que el mismo ícono se ve en el
   Explorador, la bandeja, Alt+Tab y el clic derecho del escritorio.
 - Eliminar nota (con confirmación).
-- Clic en el **punto de color** del encabezado: abre la paleta de 6
-  colores ahí mismo (en el diseño ese punto es el selector de color,
-  no un adorno). También está en el menú "⋯" → Color.
 - **Duplicar nota** desde el menú "⋯": copia texto, color, modo y
   tamaño en una nota nueva, corrida un poco.
 - **Ventana "Todas las notas"** (menú de la bandeja): buscador y
@@ -149,7 +176,9 @@ Ya funciona:
   compu con una versión vieja se corrige sola sin volver a subirla.
 - Persistencia en `%APPDATA%\Simpcky\notes.json`, con autoguardado
   (debounce ~600 ms al escribir; inmediato al mover/cambiar ajustes),
-  y las preferencias en `settings.json` al lado.
+  y las preferencias en `settings.json` al lado. (Hasta la 0.3 el
+  RichEdit no avisaba los cambios —faltaba `ENM_CHANGE`— y lo escrito
+  solo se guardaba al sincronizar o al salir.)
 - Primera ejecución: una **pantalla de bienvenida** (iniciar con
   Windows, el clic derecho del escritorio, el tema, y la sincronización
   con Google como opción), y una nota de bienvenida que explica el modo
@@ -162,20 +191,15 @@ Ya funciona:
   con verificación de la huella del instalador. Los releases los arma
   GitHub Actions al subir un tag (`.github/workflows/release.yml`).
 
-Medido en esta máquina: binario de **~256 KB** con el ícono embebido
-(release, LTO, strip, `panic=abort`); con ocho notas abiertas, 3,8 MB
-de memoria privada (22 MB de *working set*, que incluye las DLL del
-sistema compartidas con el resto de Windows). La especificación pedía
-≤ 500 KB y 8–12 MB con diez notas.
+Medido en esta máquina: binario de **~440 KB** con el ícono embebido
+(release, LTO, strip, `panic=abort`); con tres notas abiertas, 19 MB de
+memoria privada, estable (sin fugas de objetos GDI ni de memoria tras
+cientos de repintados). En la 0.3 eran 256 KB y 3,8 MB con ocho notas:
+la diferencia es Direct2D/DirectWrite y la fuente de emojis en color.
+La especificación pedía ≤ 500 KB y 8–12 MB con diez notas.
 
 Diferencias que quedan contra el lienzo de diseño:
 
-- **Checklist con casillas reales** dentro de la nota (badge 3 de la
-  pantalla "Anatomía"): hoy el cuerpo es texto libre en RichEdit. Es
-  lo único grande que falta. El RichEdit no sabe dibujar casillas:
-  habría que insertarlas como objetos OLE, o reemplazar el control por
-  uno propio dibujado a mano (que además resolvería el borde de color
-  y el padding sin pelear con `EM_SETRECT`).
 - **Insignia de capa** dentro del cuerpo (la píldora "Normal" abajo a
   la derecha, badge 4): a propósito no está. El cuerpo entero es el
   RichEdit, así que no hay dónde dibujarla sin taparle texto, y el pin
@@ -188,17 +212,18 @@ Diferencias que quedan contra el lienzo de diseño:
   normal de una nota es su cuadro de texto, donde `Supr` tiene que
   borrar caracteres. Eliminar sigue estando en el menú "⋯".
 - El JSON guarda `pinned` como parte de `layer` (son la misma cosa en
-  este modelo) y todavía no tiene `checklist`.
+  este modelo), y las tareas no son un campo aparte: viven en el texto.
 
 ### Sobre "Anclar al escritorio"
 
-Usa el mismo truco no documentado que Rainmeter, Wallpaper Engine, etc.
-(mandarle a `Progman` el mensaje `0x052C` y reparentar en la `WorkerW`
-que aparece detrás de los íconos). No es una API pública: en algunas
-sesiones de Windows los íconos nunca migran a esa `WorkerW` y se quedan
-colgando directo de `Progman` — `desktop.rs` cubre ese caso reparentando
-ahí directamente (confirmado en esta máquina). Si `explorer.exe` se
-reinicia, cada nota anclada se reintenta anclar sola cada 4 segundos.
+Las notas se reparentan en la ventana que contiene los íconos
+(`SHELLDLL_DefView`): `Progman` en Windows 11 24H2+, o la `WorkerW` a la
+que Explorer los haya mudado. No es una API pública. Hasta la 0.3 se
+usaba el truco de los fondos animados (el mensaje `0x052C` y "la
+`WorkerW` que sigue" en el orden de apilado), y con "Mostrar escritorio"
+esa "siguiente" pasaba a ser una `WorkerW` oculta: las notas
+desaparecían. Si `explorer.exe` se reinicia, cada nota anclada se
+reintenta anclar sola cada 4 segundos.
 
 **Windows 11 24H2 en adelante** cambió cómo se arma el escritorio:
 `Progman` tiene `WS_EX_NOREDIRECTIONBITMAP` (se compone con
@@ -229,10 +254,19 @@ se vería pero no se podría escribir ni arrastrar.
 - `src/main.rs` — arranque, instancia única (`--new`), ajustes, carga de
   notas, bucle de mensajes y atajos.
 - `src/app.rs` — estado global (notas abiertas, ajustes).
-- `src/note.rs` — ventana de una nota: dibujo del encabezado, arrastre,
-  menú "⋯", enrollado manual/auto, capas.
-- `src/desktop.rs` — el truco de la `WorkerW`/`Progman` para anclar una
-  nota al escritorio.
+- `src/note.rs` — ventana de una nota: encabezado y sus botones,
+  arrastre, menú "⋯", enrollado manual/auto, capas, escala.
+- `src/editor.rs` — el cuerpo de la nota: RichEdit con formato, listas,
+  pegado limpio, emojis y casillas encima, barra fina y menú del clic
+  derecho.
+- `src/richtext.rs` — el formato como dato (tramos, listas, emojis),
+  sin ventanas y con tests.
+- `src/flyout.rs` — el menú propio (muestras de color, botones de
+  formato, íconos de Segoe Fluent Icons).
+- `src/d2d.rs` — Direct2D/DirectWrite a mano (emojis y títulos en
+  color).
+- `src/desktop.rs` — anclar una nota al escritorio (el padre de los
+  íconos).
 - `src/allnotes.rs` — ventana "Todas las notas": buscador y grilla de
   tarjetas, dibujada a mano con GDI+ y doble buffer.
 - `src/sync.rs` — sincronización: la fusión (pura, con tests), cuándo
