@@ -1411,6 +1411,9 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
         }
         WM_KEYDOWN => {
             let vk = wparam as u16;
+            if ![VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN].contains(&vk) && !ctrl() {
+                crate::seltool::hide_for(edit);
+            }
             let alt = GetKeyState(VK_MENU as i32) < 0;
             let shift = GetKeyState(VK_SHIFT as i32) < 0;
             // Pegar con el teclado pasa por `on_paste` (el RichEdit lo
@@ -1477,6 +1480,7 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
             0
         }
         WM_LBUTTONDOWN => {
+            crate::seltool::hide();
             let x = (lparam & 0xffff) as i16 as i32;
             let y = ((lparam >> 16) & 0xffff) as i16 as i32;
             if let Some(b) = on_bar(edit, x) {
@@ -1545,6 +1549,8 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
             }
             let r = DefSubclassProc(edit, msg, wparam, lparam);
             paint_overlay(edit);
+            // Se terminó de seleccionar con el mouse: la barra de formato.
+            crate::seltool::show_for(edit);
             r
         }
         WM_CAPTURECHANGED => {
@@ -1571,7 +1577,12 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
             }
             r
         }
+        WM_MOUSEWHEEL | WM_VSCROLL => {
+            crate::seltool::hide_for(edit);
+            DefSubclassProc(edit, msg, wparam, lparam)
+        }
         WM_CONTEXTMENU => {
+            crate::seltool::hide_for(edit);
             let p = if lparam == -1 {
                 None
             } else {
@@ -1581,11 +1592,15 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
             0
         }
         WM_SETFOCUS | WM_KILLFOCUS => {
+            if msg == WM_KILLFOCUS {
+                crate::seltool::hide_for(edit);
+            }
             let r = DefSubclassProc(edit, msg, wparam, lparam);
             crate::note::on_focus_change(GetParent(edit));
             r
         }
         WM_NCDESTROY => {
+            crate::seltool::hide_for(edit);
             let doc = EDITS.with(|m| m.borrow_mut().remove(&(edit as isize)).map(|s| s.doc));
             if let Some(doc) = doc {
                 com_release(doc);
@@ -1597,11 +1612,43 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
     }
 }
 
+/// Para la barra de formato (`seltool.rs`): el rectángulo de la selección
+/// en pantalla (de la primera línea a la última, recortado a lo que se
+/// ve) y qué estilos tiene. `None`: nada seleccionado, o bloqueada.
+pub fn selection_box(edit: HWND) -> Option<(RECT, [bool; STYLES])> {
+    let (s, e) = selection(edit);
+    if s == e || locked(edit) {
+        return None;
+    }
+    let first = pos(edit, s);
+    let last_cp = e.saturating_sub(1).max(s);
+    let last = pos(edit, last_cp);
+    let bottom = line_bottom(edit, last_cp, last.y);
+    unsafe {
+        let mut client = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        GetClientRect(edit, &mut client);
+        let mut r = RECT {
+            left: first.x.min(last.x).max(0),
+            top: first.y.max(0),
+            right: (first.x.max(last.x) + em_px(edit)).min(client.right),
+            bottom: bottom.min(client.bottom),
+        };
+        if r.top >= client.bottom || r.bottom <= 0 {
+            return None; // la selección quedó fuera de la vista
+        }
+        MapWindowPoints(edit, null_mut(), &mut r as *mut RECT as *mut POINT, 2);
+        Some((r, style_state(edit)))
+    }
+}
+
 /// Solo lectura (nota bloqueada) o no. El RichEdit ya no acepta lo que se
 /// escriba; lo propio de acá (listas, casillas, formato, pegar) también
 /// se frena.
 pub fn set_locked(edit: HWND, on: bool) {
     with_state(edit, |s| s.locked = on);
+    if on {
+        crate::seltool::hide_for(edit);
+    }
     unsafe { send(edit, EM_SETREADONLY, on as usize, 0) };
 }
 

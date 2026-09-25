@@ -29,7 +29,7 @@ cargo build --release
 En debug (`cargo run`) el binario abre una consola detrás; en release no
 (`#![windows_subsystem = "windows"]`).
 
-## Estado actual (v0.4.2)
+## Estado actual (v0.4.3)
 
 Ya funciona:
 
@@ -147,6 +147,12 @@ Ya funciona:
   Alt+F4): deja el escritorio y queda guardada en "Todas las notas", con
   la tarjeta apagada y el ojo tachado. Vuelve con doble clic o
   arrastrándola afuera. Cerrar una nota ya no la borra.
+- **Barra de formato al seleccionar** (`seltool.rs`): al soltar el mouse
+  con texto seleccionado aparece arriba una barrita con B, I, U y S (las
+  que ya tiene la selección, marcadas). Es una ventana `WS_EX_NOACTIVATE`
+  que no se lleva el foco; se va al escribir, hacer clic, desplazar o
+  perder el foco, y el mouse encima cuenta como encima de la nota (para
+  el enrollado automático).
 - **Bloquear una nota** ("⋯" → Bloquear): solo lectura. El RichEdit
   pasa a `EM_SETREADONLY` (se puede seleccionar y copiar) y lo propio de
   `editor.rs` (listas, casillas, formato, pegar) se frena; la barra
@@ -334,6 +340,7 @@ se vería pero no se podría escribir ni arrastrar.
   tarjetas, dibujada a mano con GDI+ y doble buffer.
 - `src/settings.rs` — la pestaña "Configuración y sincronización".
 - `src/picker.rs` — el selector de notas del atajo global.
+- `src/seltool.rs` — la barra de formato que aparece al seleccionar.
 - `src/sync.rs` — sincronización: la fusión (pura, con tests), cuándo
   sincronizar y cómo aplicar lo que llega de otra compu.
 - `src/oauth.rs` — inicio de sesión con Google (navegador + 127.0.0.1 +

@@ -572,7 +572,7 @@ fn hot_tick(hwnd: HWND) {
     let mut pt = POINT { x: 0, y: 0 };
     unsafe { GetCursorPos(&mut pt) };
     let under = unsafe { WindowFromPoint(pt) };
-    let over = under == hwnd || unsafe { IsChild(hwnd, under) } != 0;
+    let over = under == hwnd || unsafe { IsChild(hwnd, under) } != 0 || crate::seltool::is_over(under, hwnd);
     if over {
         let mut c = pt;
         unsafe { ScreenToClient(hwnd, &mut c) };
@@ -814,6 +814,9 @@ fn paint(hwnd: HWND, hdc: HDC) {
 
 fn apply_rolled_state(hwnd: HWND, edit: HWND, w: i32, full_h: i32, rolled: bool) {
     let new_h = if rolled { header_h(hwnd) } else { full_h };
+    if rolled {
+        crate::seltool::hide_for(edit);
+    }
     unsafe {
         SetWindowPos(hwnd, null_mut(), 0, 0, w, new_h, SWP_NOMOVE | SWP_NOZORDER);
         if !edit.is_null() {
@@ -853,7 +856,7 @@ fn handle_hover_tick(hwnd: HWND) {
     let mut pt = POINT { x: 0, y: 0 };
     unsafe { GetCursorPos(&mut pt) };
     let under = unsafe { WindowFromPoint(pt) };
-    let hovered = under == hwnd || unsafe { IsChild(hwnd, under) != 0 };
+    let hovered = under == hwnd || unsafe { IsChild(hwnd, under) != 0 } || crate::seltool::is_over(under, hwnd);
     let id = note_id(hwnd);
 
     let change = {
@@ -2406,7 +2409,10 @@ pub fn handle_shortcut(target: HWND, vk: u32, repeat: bool) -> bool {
         Action::AlwaysOnTop => toggle_always_on_top(note),
         Action::Desktop => set_layer(note, Layer::Desktop),
         Action::Hide => hide_note(note),
-        Action::Style(k) => editor::toggle_style(target, k),
+        Action::Style(k) => {
+            editor::toggle_style(target, k);
+            crate::seltool::refresh(target);
+        }
         Action::Bullets => editor::toggle_bullets(target),
         Action::Todos => editor::toggle_todos(target),
         Action::Swallow => {}
@@ -2649,6 +2655,13 @@ pub unsafe extern "system" fn note_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM,
         }
         WM_EXITSIZEMOVE => {
             on_move_end(hwnd);
+            0
+        }
+        WM_MOVE => {
+            let edit = app().lock().unwrap().notes.get(&note_id(hwnd)).map(|nr| nr.edit as HWND);
+            if let Some(edit) = edit {
+                crate::seltool::hide_for(edit);
+            }
             0
         }
         WM_APP_SETTLE => {

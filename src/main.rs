@@ -20,6 +20,7 @@ mod oauth;
 mod persist;
 mod picker;
 mod richtext;
+mod seltool;
 mod settings;
 mod rename;
 mod shell;
@@ -130,6 +131,7 @@ fn main() {
     allnotes::register_class(hinstance);
     welcome::register_class(hinstance);
     picker::register_class(hinstance);
+    seltool::register_class(hinstance);
     note::load_scale();
 
     // Modo vidrio (Windhawk): antes de crear las notas, que según esto son
