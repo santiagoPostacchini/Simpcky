@@ -38,6 +38,7 @@ struct Item {
     preview: String,
     pinned: bool,
     hidden: bool,
+    locked: bool,
 }
 
 struct State {
@@ -103,6 +104,7 @@ fn collect(query: &str) -> Vec<Item> {
                 preview: crate::allnotes::preview_of(d),
                 pinned: d.layer == crate::persist::Layer::AlwaysOnTop,
                 hidden: d.hidden,
+                locked: d.locked,
             };
             (nr.last_active, d.id, item)
         })
@@ -302,7 +304,7 @@ fn on_paint(hwnd: HWND) {
             round_rect(g, &dot, p(4) as f32, header);
             // Marcas: siempre encima, oculta.
             let mut right = row.right - p(10);
-            for (on, glyph) in [(it.hidden, 0xED1Au16), (it.pinned, 0xE718)] {
+            for (on, glyph) in [(it.hidden, 0xED1Au16), (it.locked, 0xE72E), (it.pinned, 0xE718)] {
                 if on {
                     let r = RECT { left: right - p(20), top: row.top, right, bottom: row.bottom };
                     flyout::draw_glyph(mem, flyout::icon_font(-p(13)), glyph, &r, c.muted);

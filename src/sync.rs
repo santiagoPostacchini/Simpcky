@@ -100,7 +100,7 @@ pub fn merge(local: &[NoteData], local_tombs: &[Tomb], remote: &[NoteData], remo
     }
     for n in local {
         let merged = match notes.get(&n.uid) {
-            Some(r) => NoteData { id: n.id, hidden: n.hidden, ..merge_note(r, n) },
+            Some(r) => NoteData { id: n.id, hidden: n.hidden, locked: n.locked, ..merge_note(r, n) },
             None => n.clone(),
         };
         notes.insert(n.uid.clone(), merged);

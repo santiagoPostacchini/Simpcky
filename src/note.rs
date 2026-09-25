@@ -2,7 +2,7 @@
 //! botones), arrastre, menú "⋯", enrollado (manual/auto) y autoguardado.
 //! El cuerpo (texto con formato, listas, emojis) es de `editor.rs`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
@@ -61,7 +61,12 @@ const ID_TOGGLE_AUTOROLL: u32 = 2110;
 const ID_ALL_NOTES: u32 = 2111;
 /// Ocultar: la nota queda solo en "Todas las notas".
 const ID_HIDE: u32 = 2112;
+/// Bloquear: solo lectura, hasta tocar el candado.
+const ID_LOCK: u32 = 2113;
 const TIMER_PEEK_END: usize = 4;
+/// Acomodar otra vez las notas del escritorio: un momento después de que
+/// se active una, y un rato después de arrancar (ver `settle_widgets_with`).
+const TIMER_SETTLE: usize = 7;
 
 /// (encabezado, cuerpo, tinta) del color de la nota en el tema actual
 /// (ver `theme.rs`: la misma nota tiene su versión clara y oscura).
@@ -165,7 +170,10 @@ fn create_window(data: &NoteData) -> HWND {
             ex_style,
             class_name.as_ptr(),
             null(),
-            style | WS_VISIBLE | WS_CLIPCHILDREN,
+            // Sin WS_VISIBLE: una ventana que nace visible se activa, y al
+            // arrancar la app eso ponía las notas adelante de las
+            // aplicaciones. Se muestran al final, sin activarlas.
+            style | WS_CLIPCHILDREN,
             x,
             y,
             data.w,
@@ -217,6 +225,7 @@ fn create_window(data: &NoteData) -> HWND {
                 SetWindowLongPtrW(hwnd, GWL_STYLE, (style & !WS_BORDER) as i32 as isize);
                 SetWindowPos(hwnd, null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
             }
+            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
     }
     hwnd
@@ -395,6 +404,8 @@ enum Hit {
     Chevron,
     /// "⋯": colores y el resto de las opciones.
     More,
+    /// El candado de una nota bloqueada: la desbloquea.
+    Lock,
     /// El resto de la barra: arrastrar mueve la nota, doble clic la
     /// renombra.
     Bar,
@@ -419,10 +430,13 @@ struct HeaderLayout {
     /// en la nota; el resto del tiempo la barra es nada más el título
     /// (un widget de escritorio no necesita cuatro íconos a la vista).
     buttons: bool,
+    /// Nota bloqueada: en lugar de los botones, solo el candado, siempre
+    /// a la vista.
+    lock: Option<RECT>,
 }
 
 impl HeaderLayout {
-    fn new(width: i32, buttons: bool, chevron: bool, dpi: i32, warn: bool) -> Self {
+    fn new(width: i32, buttons: bool, chevron: bool, dpi: i32, warn: bool, locked: bool) -> Self {
         let p = |v| flyout::px(dpi, v);
         let height = p(HEADER_H);
         let (bw, bh, edge) = (p(BTN_W), p(BTN_H), p(6));
@@ -430,11 +444,17 @@ impl HeaderLayout {
         let slot = |i: i32| RECT { left: width - edge - bw * (i + 1), top, right: width - edge - bw * i, bottom: top + bh };
         let more = slot(0);
         let (chevron, pin, add) = if chevron { (Some(slot(1)), slot(2), slot(3)) } else { (None, slot(1), slot(2)) };
-        let right = if buttons { add.left - p(4) } else { width - p(14) };
+        let buttons = buttons && !locked;
+        let lock = locked.then(|| slot(0));
+        let right = match lock {
+            Some(r) => r.left - p(4),
+            None if buttons => add.left - p(4),
+            None => width - p(14),
+        };
         let warn = warn.then(|| RECT { left: p(8), top, right: p(8) + bh, bottom: top + bh });
         let left = warn.map(|r| r.right + p(2)).unwrap_or(p(14));
         let title_rect = RECT { left, top: 0, right: right.max(left), bottom: height };
-        HeaderLayout { height, warn, add, pin, chevron, more, title_rect, buttons }
+        HeaderLayout { height, warn, add, pin, chevron, more, title_rect, buttons, lock }
     }
 
     fn hit(&self, x: i32, y: i32) -> Hit {
@@ -442,6 +462,9 @@ impl HeaderLayout {
             return Hit::None;
         }
         let inside = |r: &RECT| x >= r.left && x < r.right && y >= r.top && y < r.bottom;
+        if self.lock.as_ref().is_some_and(inside) {
+            return Hit::Lock;
+        }
         if self.buttons {
             if inside(&self.more) {
                 return Hit::More;
@@ -489,7 +512,7 @@ fn layout_of(hwnd: HWND) -> HeaderLayout {
     let auto = app().lock().unwrap().notes.get(&id).is_some_and(|nr| nr.data.roll_mode == RollMode::Auto);
     let hover = header_state(hwnd, |s| s.hover);
     let buttons = hover || has_focus(hwnd) || crate::rename::is_renaming(hwnd);
-    HeaderLayout::new(rc.right, buttons, !auto, px(hwnd, 96), crate::app::save_failing())
+    HeaderLayout::new(rc.right, buttons, !auto, px(hwnd, 96), crate::app::save_failing(), is_locked(hwnd))
 }
 
 /// Repinta el encabezado de todas las notas (cambió algo que muestran
@@ -567,12 +590,13 @@ fn hot_tick(hwnd: HWND) {
     invalidate_header(hwnd);
 }
 
-const TIPS: [(usize, &str); 5] = [
+const TIPS: [(usize, &str); 6] = [
     (1, "Nota nueva (Ctrl+N)"),
     (2, "Siempre encima (Ctrl+Mayús+T)"),
     (3, "Enrollar o desenrollar (Ctrl+R)"),
     (4, "Color y más opciones"),
     (5, "No se pudo guardar en el disco: Simpcky reintenta solo (ver el ícono de la bandeja)"),
+    (6, "Bloqueada: solo para leer y copiar. Clic para desbloquearla"),
 ];
 
 /// Las ayudas que aparecen al dejar el mouse sobre un botón.
@@ -625,6 +649,7 @@ fn update_tooltips(hwnd: HWND, layout: &HeaderLayout) {
         (3, if layout.buttons { layout.chevron.unwrap_or(none) } else { none }),
         (4, if layout.buttons { layout.more } else { none }),
         (5, layout.warn.unwrap_or(none)),
+        (6, layout.lock.unwrap_or(none)),
     ];
     for (id, rect) in rects {
         let mut ti: TTTOOLINFOW = unsafe { std::mem::zeroed() };
@@ -741,6 +766,16 @@ fn paint(hwnd: HWND, hdc: HDC) {
             }
             GdipDeleteGraphics(g);
         }
+        if let Some(rect) = layout.lock {
+            if hot == Some(Hit::Lock) {
+                let mut g: *mut GpGraphics = null_mut();
+                GdipCreateFromHDC(mem, &mut g);
+                GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
+                flyout::fill_round(g, &rect, px(hwnd, 5) as f32, blend(ink, header_color, 0x24));
+                GdipDeleteGraphics(g);
+            }
+            flyout::draw_glyph(mem, flyout::icon_font(-px(hwnd, 15)), LOCK_GLYPH, &rect, ink);
+        }
 
         if let Some(r) = layout.warn {
             flyout::draw_glyph(mem, flyout::icon_font(-px(hwnd, 16)), 0xE7BA, &r, ink);
@@ -837,6 +872,30 @@ fn handle_hover_tick(hwnd: HWND) {
     };
     if let Some((rolled, w, h, edit)) = change {
         apply_rolled_state(hwnd, edit, w, h, rolled);
+        if !rolled {
+            raise_above_notes(hwnd);
+        }
+    }
+}
+
+/// La que se desenrolla pasa adelante de las otras notas (si no, otra
+/// enrollada encima le tapaba el texto), sin pasar adelante de ninguna
+/// aplicación ni robar el foco.
+fn raise_above_notes(hwnd: HWND) {
+    unsafe {
+        if GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & WS_CHILD != 0 {
+            // Anclada: hija del escritorio, arriba de sus hermanas.
+            crate::desktop::raise(hwnd);
+        } else if glass_widget(hwnd) {
+            // Widget en modo vidrio: justo encima del más alto de los
+            // otros widgets (que están debajo de las aplicaciones). Mandar
+            // al fondo uno por uno no sirve para ordenarlos: con ventanas
+            // "poseídas" por el escritorio, Windows no respeta ese orden.
+            place_above(hwnd, widget_base(hwnd));
+        } else {
+            // "Siempre encima" (o asomada): al tope de su capa.
+            SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
     }
 }
 
@@ -881,6 +940,7 @@ fn show_note_menu(hwnd: HWND, below: RECT) {
         Entry::Separator,
         Entry::toggle(ID_TOGGLE_TOP, 0xE718, "Siempre encima", "Ctrl+Mayús+T", layer == Layer::AlwaysOnTop),
         Entry::toggle(ID_TOGGLE_AUTOROLL, 0xE70E, "Enrollar al quitar el mouse", "", roll_mode == RollMode::Auto),
+        Entry::item(ID_LOCK, LOCK_GLYPH, "Bloquear (solo lectura)", ""),
         Entry::item(ID_RENAME, 0xE8AC, "Cambiar nombre", "F2"),
         Entry::item(ID_DUPLICATE_NOTE, 0xE8C8, "Duplicar", ""),
         Entry::item(ID_HIDE, 0xED1A, "Ocultar", "Ctrl+W"),
@@ -1197,6 +1257,39 @@ pub fn delete_by_id(id: u32, owner: HWND) {
 // -----------------------------------------------------------------
 // Guardar en "Todas las notas" (ocultar) y volver a mostrar
 // -----------------------------------------------------------------
+
+/// El candado del encabezado (Segoe Fluent Icons / MDL2: "Lock").
+const LOCK_GLYPH: u16 = 0xE72E;
+
+pub fn is_locked(hwnd: HWND) -> bool {
+    let id = note_id(hwnd);
+    app().lock().unwrap().notes.get(&id).is_some_and(|nr| nr.data.locked)
+}
+
+/// Bloquea la nota (solo lectura: se puede leer, seleccionar y copiar,
+/// moverla y nada más; en la barra queda solo el candado) o la libera
+/// (tocando el candado).
+pub fn set_locked(hwnd: HWND, on: bool) {
+    let id = note_id(hwnd);
+    let edit = {
+        let mut a = app().lock().unwrap();
+        let Some(nr) = a.notes.get_mut(&id) else { return };
+        nr.data.locked = on;
+        nr.edit as HWND
+    };
+    if on {
+        flyout::close();
+        crate::rename::finish(hwnd, true);
+    }
+    if !edit.is_null() {
+        editor::set_locked(edit, on);
+    }
+    header_state(hwnd, |s| s.hot = None);
+    // Cambia solo la barra (y la agarradera): repintar la nota entera
+    // borraba el texto hasta el próximo repintado del RichEdit.
+    invalidate_header(hwnd);
+    save_all();
+}
 
 /// "Ocultar" (menú, Ctrl+W o cerrar la ventana): la nota deja el
 /// escritorio y queda guardada en "Todas las notas", de donde vuelve con
@@ -1517,7 +1610,7 @@ fn commit_text_and_save(hwnd: HWND) {
 
 fn on_create(hwnd: HWND) {
     let id = note_id(hwnd);
-    let (hinstance, color, w, content_h, rolled, text, fmt, roll_mode, layer) = {
+    let (hinstance, color, w, content_h, rolled, text, fmt, roll_mode, layer, locked) = {
         let a = app().lock().unwrap();
         let nr = a.notes.get(&id).expect("nota registrada antes de crear la ventana");
         (
@@ -1530,6 +1623,7 @@ fn on_create(hwnd: HWND) {
             nr.data.fmt.clone(),
             nr.data.roll_mode,
             nr.data.layer,
+            nr.data.locked,
         )
     };
     let rc = edit_rect(hwnd, w, header_h(hwnd) + content_h);
@@ -1540,6 +1634,9 @@ fn on_create(hwnd: HWND) {
     apply_text_padding(edit, w, rc.bottom - rc.top);
     create_tooltips(hwnd);
     editor::set_glass(edit, crate::glass::opacity().map(|(_, b)| b));
+    if locked {
+        editor::set_locked(edit, true);
+    }
     if rolled && !edit.is_null() {
         unsafe { ShowWindow(edit, SW_HIDE) };
     }
@@ -1683,6 +1780,12 @@ unsafe fn paint_glass_header(
             c.text(rect, &String::from_utf16_lossy(&[glyph]), flyout::icon_font(-px(hwnd, 15)), ink, center);
         }
     }
+    if let Some(rect) = layout.lock {
+        if hot == Some(Hit::Lock) {
+            c.with_graphics(|g| flyout::fill_round_argb(g, &rect, px(hwnd, 5) as f32, crate::glass::argb(ink, 0x30)));
+        }
+        c.text(rect, &String::from_utf16_lossy(&[LOCK_GLYPH]), flyout::icon_font(-px(hwnd, 15)), ink, center);
+    }
     if let Some(r) = layout.warn {
         c.text(r, &String::from_utf16_lossy(&[0xE7BA]), flyout::icon_font(-px(hwnd, 16)), ink, center);
     }
@@ -1708,29 +1811,127 @@ fn glass_widget(hwnd: HWND) -> bool {
     app().lock().unwrap().notes.get(&id).is_some_and(|nr| nr.data.layer != Layer::AlwaysOnTop && !nr.peeking)
 }
 
-/// Dónde va un widget en modo vidrio en el orden de las ventanas: encima
-/// de los otros widgets (el que se toca pasa adelante de las demás
-/// notas) pero nunca encima de una aplicación.
-fn widget_slot(hwnd: HWND) -> HWND {
-    let others: Vec<HWND> = {
+/// Los widgets en modo vidrio (menos `except`), de arriba hacia abajo.
+fn widgets_top_down(except: HWND) -> Vec<HWND> {
+    let set: Vec<HWND> = {
         let a = app().lock().unwrap();
         a.notes
             .values()
-            .filter(|nr| nr.hwnd != 0 && nr.hwnd != hwnd as isize && nr.data.layer != Layer::AlwaysOnTop && !nr.peeking)
+            .filter(|nr| nr.hwnd != 0 && nr.hwnd != except as isize && nr.data.layer != Layer::AlwaysOnTop && !nr.peeking)
             .map(|nr| nr.hwnd as HWND)
             .collect()
     };
+    let mut out = Vec::new();
     unsafe {
         let mut w = GetTopWindow(null_mut());
-        while !w.is_null() {
-            if others.contains(&w) {
-                let above = GetWindow(w, GW_HWNDPREV);
-                return if above.is_null() { HWND_TOP } else { above };
+        while !w.is_null() && out.len() < set.len() {
+            if set.contains(&w) {
+                out.push(w);
             }
             w = GetWindow(w, GW_HWNDNEXT);
         }
     }
-    HWND_BOTTOM
+    out
+}
+
+/// La sombra que Windows le pone abajo a cada ventana emergente es una
+/// ventana aparte ("SysShadow"): no cuenta para ubicar las notas.
+fn is_shadow(w: HWND) -> bool {
+    let mut buf = [0u16; 16];
+    let n = unsafe { GetClassNameW(w, buf.as_mut_ptr(), buf.len() as i32) } as usize;
+    String::from_utf16_lossy(&buf[..n]) == "SysShadow"
+}
+
+/// La ventana justo arriba de `w` en el orden, sin contar sombras ni
+/// `skip`.
+unsafe fn window_above(w: HWND, skip: HWND) -> HWND {
+    let mut a = GetWindow(w, GW_HWNDPREV);
+    while !a.is_null() && (a == skip || is_shadow(a)) {
+        a = GetWindow(a, GW_HWNDPREV);
+    }
+    a
+}
+
+/// Sobre qué va un widget en modo vidrio: el más alto de los otros
+/// widgets, o el escritorio mismo si no hay otro.
+fn widget_base(hwnd: HWND) -> HWND {
+    widgets_top_down(hwnd).first().copied().unwrap_or_else(crate::desktop::find_host)
+}
+
+/// Dónde va un widget en modo vidrio cuando Windows lo mueve en el orden
+/// de las ventanas (al tocarlo, al activarse): justo encima de los otros
+/// widgets, que están justo encima del escritorio; nunca encima de una
+/// aplicación. `None`: no hay escritorio donde apoyarlo.
+fn widget_slot(hwnd: HWND) -> Option<HWND> {
+    let base = widget_base(hwnd);
+    if base.is_null() {
+        return None;
+    }
+    let after = unsafe { window_above(base, hwnd) };
+    Some(if after.is_null() { HWND_TOP } else { after })
+}
+
+/// Pone `hwnd` justo encima de `base` (otro widget, o el escritorio):
+/// "insertar después de" la ventana que hoy está arriba de `base`. Nada
+/// de HWND_BOTTOM: con ventanas "poseídas" por el escritorio, Windows no
+/// las manda al fondo (quedaban adelante de las aplicaciones).
+unsafe fn place_above(hwnd: HWND, base: HWND) {
+    if base.is_null() {
+        return;
+    }
+    let after = window_above(base, hwnd);
+    RESTACKING.set(true);
+    SetWindowPos(hwnd, if after.is_null() { HWND_TOP } else { after }, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    RESTACKING.set(false);
+}
+
+thread_local! {
+    /// Acomodando los widgets a propósito (`settle_widgets`,
+    /// `raise_above_notes`): el ajuste
+    /// de WM_WINDOWPOSCHANGING no se mete.
+    static RESTACKING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Todas las notas del escritorio (modo vidrio) juntas, justo encima de
+/// él y en el orden que tenían —con `first` arriba de todas—, así ninguna
+/// queda adelante de una aplicación. De arriba hacia abajo, cada una se
+/// apoya directo sobre el escritorio, debajo de las anteriores.
+///
+/// Hace falta después de que se active una: Windows sube juntas todas las
+/// ventanas "poseídas" por el escritorio (las notas, y hasta una ventana
+/// suya del IME), y quedaban todas adelante de las aplicaciones.
+fn settle_widgets_with(first: HWND) {
+    if !crate::glass::active() {
+        return;
+    }
+    let host = crate::desktop::find_host();
+    let first = (!first.is_null() && glass_widget(first)).then_some(first);
+    for h in first.into_iter().chain(widgets_top_down(first.unwrap_or(null_mut()))) {
+        unsafe { place_above(h, host) };
+    }
+}
+
+pub fn settle_widgets() {
+    settle_widgets_with(null_mut());
+}
+
+/// Acomodar las notas del escritorio en cuanto se pueda (no en medio de
+/// una activación): con `hwnd` arriba de las otras.
+const WM_APP_SETTLE: u32 = WM_APP + 40;
+
+pub fn settle_soon(hwnd: HWND) {
+    unsafe { PostMessageW(hwnd, WM_APP_SETTLE, 0, 0) };
+}
+
+/// Al arrancar: acomodar las notas del escritorio en cuanto arranque el
+/// bucle de mensajes (y otra vez un rato después, por si Windows activa
+/// una más tarde).
+pub fn settle_later() {
+    let any = app().lock().unwrap().notes.values().find(|nr| nr.hwnd != 0).map(|nr| nr.hwnd as HWND);
+    if let Some(h) = any {
+        settle_soon(h);
+        unsafe { SetTimer(h, TIMER_SETTLE, 1500, None) };
+    }
 }
 
 /// Cambió el nivel de transparencia: se repintan (la opacidad de cada
@@ -1758,6 +1959,7 @@ pub fn recreate_all() {
         unsafe { DestroyWindow(h) };
     }
     recreate_lost();
+    settle_widgets();
 }
 
 /// Fin de un arrastre o de un resize (WM_EXITSIZEMOVE cubre ambos).
@@ -1845,7 +2047,7 @@ fn on_destroy(hwnd: HWND) {
 fn on_dblclick(hwnd: HWND, lparam: LPARAM) {
     let x = (lparam & 0xffff) as i16 as i32;
     let y = ((lparam >> 16) & 0xffff) as i16 as i32;
-    if layout_of(hwnd).hit(x, y) == Hit::Bar {
+    if layout_of(hwnd).hit(x, y) == Hit::Bar && !is_locked(hwnd) {
         crate::rename::begin(hwnd);
     }
 }
@@ -1862,7 +2064,7 @@ const RESIZE_CORNER: i32 = 18;
 /// alto queda fijo al del encabezado).
 pub fn resize_hit(hwnd: HWND, x: i32, y: i32) -> u32 {
     let id = note_id(hwnd);
-    if app().lock().unwrap().notes.get(&id).is_none_or(|nr| nr.data.rolled) {
+    if app().lock().unwrap().notes.get(&id).is_none_or(|nr| nr.data.rolled || nr.data.locked) {
         return 0;
     }
     let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
@@ -2082,6 +2284,7 @@ fn on_lbuttondown(hwnd: HWND, lparam: LPARAM) {
             show_note_menu(hwnd, r);
         }
         Hit::Pin => toggle_always_on_top(hwnd),
+        Hit::Lock => set_locked(hwnd, false),
         Hit::Bar => on_bar_click(hwnd, x, y),
         Hit::None => {
             let id = note_id(hwnd);
@@ -2185,6 +2388,11 @@ pub fn handle_shortcut(target: HWND, vk: u32, repeat: bool) -> bool {
         }
     };
     let Some(action) = action else { return false };
+    // Bloqueada: nada que la cambie (sí una nota nueva). La tecla se
+    // traga igual, para que tampoco la tome el texto.
+    if !note.is_null() && is_locked(note) && !matches!(action, Action::NewNote) {
+        return true;
+    }
     // Tecla mantenida apretada: el atajo ya se ejecutó con la primera
     // pulsación; las repeticiones se tragan sin hacer nada (ni pasarle
     // la tecla al texto).
@@ -2268,6 +2476,7 @@ fn on_command(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
             ID_RENAME => crate::rename::begin(hwnd),
             ID_ALL_NOTES => crate::allnotes::show(),
             ID_HIDE => hide_note(hwnd),
+            ID_LOCK => set_locked(hwnd, true),
             id if (ID_COLOR_BASE..ID_COLOR_BASE + crate::theme::PALETTE_LEN as u32).contains(&id) => {
                 set_color(hwnd, (id - ID_COLOR_BASE) as u8)
             }
@@ -2335,6 +2544,10 @@ fn on_timer(hwnd: HWND, wparam: WPARAM) {
             commit_text_and_save(hwnd);
         }
         TIMER_HOT => hot_tick(hwnd),
+        TIMER_SETTLE => {
+            unsafe { KillTimer(hwnd, TIMER_SETTLE) };
+            settle_widgets_with(hwnd);
+        }
         _ => {}
     }
 }
@@ -2382,8 +2595,11 @@ pub unsafe extern "system" fn note_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM,
         // activen (si no, un clic lo pasaba adelante de las aplicaciones).
         WM_WINDOWPOSCHANGING => {
             let wp = &mut *(lparam as *mut WINDOWPOS);
-            if wp.flags & SWP_NOZORDER == 0 && glass_widget(hwnd) {
-                wp.hwndInsertAfter = widget_slot(hwnd);
+            if wp.flags & SWP_NOZORDER == 0 && !RESTACKING.get() && glass_widget(hwnd) {
+                match widget_slot(hwnd) {
+                    Some(after) => wp.hwndInsertAfter = after,
+                    None => wp.flags |= SWP_NOZORDER,
+                }
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
@@ -2435,11 +2651,21 @@ pub unsafe extern "system" fn note_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM,
             on_move_end(hwnd);
             0
         }
+        WM_APP_SETTLE => {
+            settle_widgets_with(hwnd);
+            0
+        }
         // Clic en cualquier parte de una nota anclada (también en su
         // texto): pasa adelante de las otras notas. Las ventanas hijas
         // no cambian de orden solas.
         WM_MOUSEACTIVATE => {
             crate::desktop::raise(hwnd);
+            // Modo vidrio: al hacer clic, Windows sube la nota —y con ella
+            // todas las poseídas por el escritorio— apenas vuelve de acá.
+            // El mensaje en cola se atiende después: ahí se acomodan.
+            if glass_widget(hwnd) {
+                settle_soon(hwnd);
+            }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_ACTIVATE => {
@@ -2455,6 +2681,12 @@ pub unsafe extern "system" fn note_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM,
                 let id = note_id(hwnd);
                 if let Some(nr) = app().lock().unwrap().notes.get_mut(&id) {
                     nr.last_active = crate::persist::now_ms();
+                }
+                if glass_widget(hwnd) {
+                    // Windows sube el grupo recién después de activarla (y
+                    // sin avisarle a las ventanas): se acomoda un momento
+                    // más tarde.
+                    SetTimer(hwnd, TIMER_SETTLE, 60, None);
                 }
                 // Al activarse, el foco va al texto (DefWindowProc lo
                 // dejaría en la ventana de la nota, sin cursor).
@@ -2480,7 +2712,9 @@ pub unsafe extern "system" fn note_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM,
         // Alt+F4, o "Cerrar ventana" en la barra de tareas (siempre
         // encima): se guarda en "Todas las notas", no se borra.
         WM_CLOSE => {
-            hide_note(hwnd);
+            if !is_locked(hwnd) {
+                hide_note(hwnd);
+            }
             0
         }
         WM_DESTROY => {

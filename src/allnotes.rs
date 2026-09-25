@@ -76,6 +76,7 @@ enum View {
 struct Item {
     id: u32,
     hidden: bool,
+    locked: bool,
     color: u8,
     pinned: bool,
     rolled: bool,
@@ -344,6 +345,7 @@ fn refresh_list(hwnd: HWND) {
                     Item {
                         id: nr.data.id,
                         hidden: nr.data.hidden,
+                        locked: nr.data.locked,
                         color: nr.data.color,
                         pinned: nr.data.layer == Layer::AlwaysOnTop,
                         rolled: nr.data.rolled,
@@ -785,10 +787,14 @@ unsafe fn draw_cards(hdc: HDC, cw: i32, ch: i32, ui_font: HFONT, title_font: HFO
         }
 
         let fill = faded(if theme::is_dark() { mix(body, header, 0.55) } else { body });
-        let marks = it.pinned as i32 + it.hidden as i32;
-        if it.hidden {
-            let x = rr.right - 20 - if it.pinned { 14 } else { 0 };
-            flyout::draw_glyph(hdc, flyout::icon_font(-12), 0xED1A, &RECT { left: x, top: rr.top + 4, right: x + 16, bottom: rr.top + 20 }, ink);
+        let marks = it.pinned as i32 + it.hidden as i32 + it.locked as i32;
+        // Marcas a la izquierda del pin: oculta, bloqueada.
+        let mut x = rr.right - 20 - if it.pinned { 14 } else { 0 };
+        for (on, glyph) in [(it.hidden, 0xED1Au16), (it.locked, 0xE72E)] {
+            if on {
+                flyout::draw_glyph(hdc, flyout::icon_font(-12), glyph, &RECT { left: x, top: rr.top + 4, right: x + 16, bottom: rr.top + 20 }, ink);
+                x -= 14;
+            }
         }
         let text_right = rr.right - 8 - marks * 14;
         let old = SelectObject(hdc, title_font);
@@ -868,6 +874,11 @@ fn selected_note() -> Option<(u32, bool)> {
     s.items.get(s.sel as usize).map(|it| (it.id, it.hidden))
 }
 
+fn selected_locked() -> bool {
+    let s = state().lock().unwrap();
+    s.sel >= 0 && s.items.get(s.sel as usize).is_some_and(|it| it.locked)
+}
+
 fn open_selected() {
     if let Some((id, _)) = selected_note() {
         note::open_by_id(id);
@@ -886,19 +897,22 @@ fn rename_selected() {
 fn show_card_menu(hwnd: HWND, idx: i32) {
     set_sel(hwnd, idx);
     let Some((target, hidden)) = selected_note() else { return };
+    // Bloqueada: solo abrirla (se desbloquea con el candado de la nota).
+    let locked = selected_locked();
+    let off = if locked { MF_GRAYED | MF_DISABLED } else { 0 };
     let choice = unsafe {
         let menu = CreatePopupMenu();
         let open = wide("Abrir");
         let hide = wide("Ocultar");
         let rename = wide("Cambiar nombre\tF2");
-        let delete = wide("Eliminar nota");
+        let delete = wide(if locked { "Eliminar nota (está bloqueada)" } else { "Eliminar nota" });
         AppendMenuW(menu, MF_STRING, MENU_OPEN, open.as_ptr());
         if !hidden {
-            AppendMenuW(menu, MF_STRING, MENU_HIDE, hide.as_ptr());
+            AppendMenuW(menu, MF_STRING | off, MENU_HIDE, hide.as_ptr());
         }
-        AppendMenuW(menu, MF_STRING, MENU_RENAME, rename.as_ptr());
+        AppendMenuW(menu, MF_STRING | off, MENU_RENAME, rename.as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
-        AppendMenuW(menu, MF_STRING, MENU_DELETE, delete.as_ptr());
+        AppendMenuW(menu, MF_STRING | off, MENU_DELETE, delete.as_ptr());
         SetMenuDefaultItem(menu, MENU_OPEN as u32, 0);
         let mut pt = POINT { x: 0, y: 0 };
         GetCursorPos(&mut pt);

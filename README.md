@@ -29,7 +29,7 @@ cargo build --release
 En debug (`cargo run`) el binario abre una consola detrás; en release no
 (`#![windows_subsystem = "windows"]`).
 
-## Estado actual (v0.4.1)
+## Estado actual (v0.4.2)
 
 Ya funciona:
 
@@ -120,6 +120,12 @@ Ya funciona:
   18 px de cada lado (el texto le deja pasar el mouse a la nota ahí),
   y con el mouse encima aparece una agarradera de tres puntitos abajo a
   la derecha.
+- **La que se desenrolla pasa adelante**: con enrollado automático, al
+  desenrollarse la nota sube arriba de las otras notas (sin pasar
+  adelante de ninguna aplicación). En modo vidrio las notas del
+  escritorio se acomodan todas juntas justo encima del escritorio
+  (`settle_widgets`), y nacen sin activarse: una ventana que nace
+  visible se activa, y al arrancar eso las ponía adelante de todo.
 - **Sacarle el "siempre encima"** a la nota que se está usando no la
   manda al escritorio de golpe: se queda adelante, asomada, hasta que
   el foco pase a otra cosa.
@@ -141,6 +147,12 @@ Ya funciona:
   Alt+F4): deja el escritorio y queda guardada en "Todas las notas", con
   la tarjeta apagada y el ojo tachado. Vuelve con doble clic o
   arrastrándola afuera. Cerrar una nota ya no la borra.
+- **Bloquear una nota** ("⋯" → Bloquear): solo lectura. El RichEdit
+  pasa a `EM_SETREADONLY` (se puede seleccionar y copiar) y lo propio de
+  `editor.rs` (listas, casillas, formato, pegar) se frena; la barra
+  muestra solo un candado, que al tocarlo la desbloquea. Tampoco se
+  puede renombrar, enrollar, cambiar de tamaño, ocultar ni borrar
+  mientras tanto; sí moverla. Como "oculta", es de cada compu.
 - **El menú de la nota** se abre solo con "⋯" (antes también con clic
   derecho en la barra). El clic derecho en el texto sigue siendo el del
   formato.

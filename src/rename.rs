@@ -45,6 +45,9 @@ pub fn is_renaming(note: HWND) -> bool {
 
 /// Abre el cuadro de renombrar sobre el título de `note`.
 pub fn begin(note: HWND) {
+    if crate::note::is_locked(note) {
+        return;
+    }
     // Si ya había otro abierto (en otra nota), se confirma primero.
     let other = ACTIVE.lock().unwrap().as_ref().map(|a| a.note);
     if let Some(other) = other {

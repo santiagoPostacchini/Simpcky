@@ -31,7 +31,7 @@ use windows_sys::core::GUID;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::Graphics::GdiPlus::*;
-use windows_sys::Win32::UI::Controls::{EM_CHARFROMPOS, EM_POSFROMCHAR};
+use windows_sys::Win32::UI::Controls::{EM_CHARFROMPOS, EM_POSFROMCHAR, EM_SETREADONLY};
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
@@ -232,6 +232,8 @@ struct EditState {
     /// Modo vidrio (ver `glass.rs`): opacidad del color de la nota sobre
     /// el desenfoque de Windhawk. `None`: liso.
     glass: Option<u8>,
+    /// Nota bloqueada: solo lectura (se puede seleccionar y copiar).
+    locked: bool,
 }
 
 /// Temporizador del RichEdit para acomodar la presentación un momento
@@ -312,6 +314,7 @@ pub fn create(parent: HWND, hinstance: HINSTANCE, id: usize, rc: RECT) -> HWND {
                     bar_hover: false,
                     bar_drag: None,
                     glass: None,
+                    locked: false,
                 })
         });
         SetWindowSubclass(edit, Some(subclass_proc), 1, 0);
@@ -561,6 +564,16 @@ fn colors(edit: HWND) -> (u32, u32) {
 /// deshacer vacío: lo cargado no es algo que se pueda "deshacer".
 pub fn load(edit: HWND, text: &str, fmt: &str) {
     let (ink, body) = colors(edit);
+    // Lo que llega de otra compu se carga aunque esté bloqueada.
+    let ro = locked(edit);
+    if ro {
+        unsafe { send(edit, EM_SETREADONLY, 0, 0) };
+    }
+    let _restore = Restore(move || {
+        if ro {
+            unsafe { send(edit, EM_SETREADONLY, 1, 0) };
+        }
+    });
     {
         let _q = Quiet::new(edit);
         let w = wide(&text.replace('\n', "\r"));
@@ -744,6 +757,9 @@ fn changed(edit: HWND) {
 /// Negrita, cursiva, subrayado o tachado en la selección (o para lo que
 /// se escriba a continuación, si no hay selección).
 pub fn toggle_style(edit: HWND, style: usize) {
+    if locked(edit) {
+        return;
+    }
     let on = style_state(edit)[style];
     set_format(edit, SCF_SELECTION, &CharFormat::new(STYLE_MASKS[style], if on { 0 } else { STYLE_MASKS[style] }));
     changed(edit);
@@ -757,6 +773,9 @@ fn paragraph_at(text: &[u16], cp: usize) -> (usize, usize) {
 /// Viñetas o tareas en los párrafos seleccionados; si ya lo eran todos,
 /// las saca.
 pub fn toggle_list(edit: HWND, want: List) {
+    if locked(edit) {
+        return;
+    }
     let text = units(edit);
     let (s, e) = selection(edit);
     let paras: Vec<(usize, usize)> =
@@ -985,6 +1004,15 @@ fn show_menu(edit: HWND, screen: Option<POINT>) {
         }
     };
     let (s, e) = selection(edit);
+    if locked(edit) {
+        let entries = vec![
+            Entry::item(ID_COPY, 0xE8C8, "Copiar", "Ctrl+C").enabled(s != e),
+            Entry::item(ID_SELECT_ALL, 0xE8B3, "Seleccionar todo", "Ctrl+A"),
+        ];
+        let owner = unsafe { GetParent(edit) };
+        flyout::show(owner, entries, flyout::Anchor::Point(at.x, at.y));
+        return;
+    }
     let styles = style_state(edit);
     let text = units(edit);
     let (a, b) = paragraph_at(&text, s);
@@ -1015,6 +1043,9 @@ fn show_menu(edit: HWND, screen: Option<POINT>) {
 
 /// Un comando del menú del clic derecho (o de un atajo).
 pub fn command(edit: HWND, id: u32) {
+    if locked(edit) && id != ID_COPY && id != ID_SELECT_ALL {
+        return;
+    }
     unsafe {
         match id {
             _ if (ID_STYLE..ID_STYLE + STYLES as u32).contains(&id) => toggle_style(edit, (id - ID_STYLE) as usize),
@@ -1385,7 +1416,9 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
             // Pegar con el teclado pasa por `on_paste` (el RichEdit lo
             // resuelve por dentro, sin mandarse WM_PASTE).
             let paste = (ctrl() && !alt && !shift && vk == 0x56) || (shift && !ctrl() && !alt && vk == VK_INSERT);
-            let handled = if paste {
+            let handled = if locked(edit) {
+                false // solo lectura: lo resuelve el RichEdit (moverse, copiar)
+            } else if paste {
                 SendMessageW(edit, WM_PASTE, 0, 0);
                 true
             } else if alt || ctrl() {
@@ -1420,7 +1453,7 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
             if swallow == Some(c) {
                 return 0;
             }
-            if c == ' ' as u16 && on_space(edit) {
+            if c == ' ' as u16 && !locked(edit) && on_space(edit) {
                 paint_overlay(edit);
                 return 0;
             }
@@ -1432,7 +1465,9 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
             r
         }
         WM_PASTE => {
-            on_paste(edit);
+            if !locked(edit) {
+                on_paste(edit);
+            }
             0
         }
         WM_TIMER if wparam == TIMER_REFRESH => {
@@ -1456,7 +1491,7 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
                 paint_overlay(edit);
                 return 0;
             }
-            if let Some(a) = checkbox_at(edit, x, y) {
+            if let Some(a) = checkbox_at(edit, x, y).filter(|_| !locked(edit)) {
                 SetFocus(edit);
                 toggle_todo(edit, a);
                 return 0;
@@ -1471,7 +1506,7 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
                 SetCursor(LoadCursorW(null_mut(), IDC_ARROW));
                 return 1;
             }
-            if (lparam & 0xffff) as u32 == HTCLIENT && checkbox_at(edit, p.x, p.y).is_some() {
+            if (lparam & 0xffff) as u32 == HTCLIENT && !locked(edit) && checkbox_at(edit, p.x, p.y).is_some() {
                 SetCursor(LoadCursorW(null_mut(), IDC_HAND));
                 return 1;
             }
@@ -1559,6 +1594,27 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
             DefSubclassProc(edit, msg, wparam, lparam)
         }
         _ => DefSubclassProc(edit, msg, wparam, lparam),
+    }
+}
+
+/// Solo lectura (nota bloqueada) o no. El RichEdit ya no acepta lo que se
+/// escriba; lo propio de acá (listas, casillas, formato, pegar) también
+/// se frena.
+pub fn set_locked(edit: HWND, on: bool) {
+    with_state(edit, |s| s.locked = on);
+    unsafe { send(edit, EM_SETREADONLY, on as usize, 0) };
+}
+
+fn locked(edit: HWND) -> bool {
+    with_state(edit, |s| s.locked).unwrap_or(false)
+}
+
+/// Hace algo al salir del bloque (pase lo que pase adentro).
+struct Restore<F: FnMut()>(F);
+
+impl<F: FnMut()> Drop for Restore<F> {
+    fn drop(&mut self) {
+        (self.0)();
     }
 }
 

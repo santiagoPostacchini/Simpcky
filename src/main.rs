@@ -137,6 +137,7 @@ fn main() {
     glass::update();
 
     load_or_create_notes();
+    note::settle_widgets();
     // Lo que se acaba de cargar es el punto de partida para detectar
     // cambios. Y se guarda enseguida: las notas de antes de la
     // sincronización recibieron su identidad al cargarse, y tiene que
@@ -144,6 +145,9 @@ fn main() {
     app::init_saved_parts();
     save_all();
     tray::init(hinstance);
+    // Otra vez, ya con todo creado: al arrancar, Windows puede activar
+    // una nota y subir todas (ver `note::settle_widgets`).
+    note::settle_later();
     sync::on_startup();
     update::on_startup();
 

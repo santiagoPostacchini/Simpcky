@@ -112,6 +112,9 @@ pub struct NoteData {
     /// que se la abra o se la arrastre afuera. Es de esta compu (no va
     /// al documento de Drive) y no es un cambio de ninguna parte.
     pub hidden: bool,
+    /// Bloqueada: solo se puede leer y copiar (ver `note::set_locked`).
+    /// Como `hidden`, es de esta compu.
+    pub locked: bool,
     /// Última modificación de cada parte (ms desde 1970; ver `CONTENT`,
     /// `COLOR`, `GEOM`, `STATE`). 0 = nunca se guardó (nota recién
     /// creada: `app::save_all` le pone la hora).
@@ -139,6 +142,7 @@ impl NoteData {
             text: String::new(),
             fmt: String::new(),
             hidden: false,
+            locked: false,
             t: [0; PARTS],
         }
     }
@@ -265,8 +269,9 @@ pub fn note_json(n: &NoteData, local: bool) -> String {
     let id = if local { format!("\"id\":{},", n.id) } else { String::new() };
     let fmt = if n.fmt.is_empty() { String::new() } else { format!("\"fmt\":\"{}\",", json::escape(&n.fmt)) };
     let hidden = if local && n.hidden { "\"hidden\":true," } else { "" };
+    let locked = if local && n.locked { "\"locked\":true," } else { "" };
     format!(
-        "{{{id}{hidden}\"uid\":\"{}\",\"x\":{},\"y\":{},\"w\":{},\"h\":{},\"color\":{},\"layer\":{},\"rollMode\":{},\"rolled\":{},\"title\":\"{}\",\"text\":\"{}\",{fmt}\"t\":[{},{},{},{}]}}",
+        "{{{id}{hidden}{locked}\"uid\":\"{}\",\"x\":{},\"y\":{},\"w\":{},\"h\":{},\"color\":{},\"layer\":{},\"rollMode\":{},\"rolled\":{},\"title\":\"{}\",\"text\":\"{}\",{fmt}\"t\":[{},{},{},{}]}}",
         json::escape(&n.uid),
         n.x,
         n.y,
@@ -308,6 +313,7 @@ pub fn note_from_json(j: &Json) -> Option<NoteData> {
         text: j.str_or("text", ""),
         fmt: j.str_or("fmt", ""),
         hidden: j.bool_or("hidden", false),
+        locked: j.bool_or("locked", false),
         t,
     })
 }
@@ -487,13 +493,14 @@ mod tests {
         n.layer = Layer::AlwaysOnTop;
         n.rolled = true;
         n.hidden = true;
+        n.locked = true;
         n.t = [1, 2, 3, 1_790_079_957_123];
         let back = note_from_json(&json::parse(&note_json(&n, true)).unwrap()).unwrap();
         assert_eq!(back, n);
         // Sin lo que es de esta compu (el documento de Drive): ni el
         // número local ni si está guardada.
         let remote = note_from_json(&json::parse(&note_json(&n, false)).unwrap()).unwrap();
-        assert_eq!((remote.id, remote.hidden), (0, false));
+        assert_eq!((remote.id, remote.hidden, remote.locked), (0, false, false));
         assert_eq!(remote.uid, n.uid);
     }
 

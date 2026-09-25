@@ -31,7 +31,7 @@ use crate::win::wide;
 /// pasaba a ser una oculta de 198×56, el vigilante mudaba las notas ahí
 /// y desaparecían hasta volver a ponerlas. El padre de los íconos no
 /// depende de ningún orden.
-fn find_host() -> HWND {
+pub fn find_host() -> HWND {
     unsafe {
         let defview_class = wide("SHELLDLL_DefView");
         let progman_class = wide("Progman");
