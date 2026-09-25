@@ -1,0 +1,323 @@
+/* Tráiler de 15 s de la página (ver trailer.js). Todo se mide en "em":
+   1em = 1/96 del ancho del cuadro, o sea 10 px en un cuadro de 960 px,
+   así se escala entero con el ancho de la página. Siempre oscuro: es un
+   escritorio de Windows. */
+
+.trailer {
+  margin: 0 0 32px;
+  position: relative;
+  container-type: inline-size;
+}
+
+.trailer .stage {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: 1.2em;
+  font-size: 7.9px; /* sin unidades de contenedor */
+  font-size: calc(100cqw / 96);
+  font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  color: #e5e7eb;
+  background: #0b1020;
+  box-shadow: 0 1.6em 4em rgba(15, 23, 42, 0.35);
+  isolation: isolate;
+  user-select: none;
+}
+
+.trailer .stage * { box-sizing: border-box; }
+
+/* Mientras se reinicia la vuelta: sin transiciones ni animaciones. */
+.trailer .stage.reset *,
+.trailer .stage.still * { transition: none !important; animation: none !important; }
+
+/* ---------- Fondo de pantalla ---------- */
+.trailer .wall {
+  position: absolute; inset: 0; z-index: 0;
+  background:
+    radial-gradient(18em 18em at 24em 20em, rgba(255, 128, 92, 0.95), transparent 70%),
+    radial-gradient(22em 16em at 48em 34em, rgba(236, 72, 153, 0.75), transparent 70%),
+    radial-gradient(26em 22em at 74em 14em, rgba(99, 102, 241, 0.8), transparent 70%),
+    radial-gradient(30em 24em at 86em 46em, rgba(20, 184, 166, 0.55), transparent 70%),
+    radial-gradient(40em 30em at 10em 50em, rgba(56, 189, 248, 0.35), transparent 70%),
+    linear-gradient(160deg, #111a3a, #0b1020 55%, #150b26);
+}
+.trailer .wall::after { /* flores sueltas: algo que se vea a través del vidrio */
+  content: ""; position: absolute; inset: 0;
+  background:
+    radial-gradient(1.4em 1.4em at 30em 12em, #fff5f7 40%, transparent 42%),
+    radial-gradient(1.1em 1.1em at 34em 15em, #ffe4ec 40%, transparent 42%),
+    radial-gradient(1.6em 1.6em at 45em 22em, #fff5f7 40%, transparent 42%),
+    radial-gradient(1.2em 1.2em at 18em 30em, #ffe4ec 40%, transparent 42%),
+    radial-gradient(1.5em 1.5em at 52em 38em, #fff5f7 40%, transparent 42%),
+    radial-gradient(1.0em 1.0em at 40em 30em, #ffd6e2 40%, transparent 42%),
+    radial-gradient(1.3em 1.3em at 25em 38em, #fff5f7 40%, transparent 42%);
+  opacity: 0.85;
+}
+
+/* ---------- Barra de tareas ---------- */
+.trailer .taskbar {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 4.8em; z-index: 36;
+  background: rgba(22, 24, 34, 0.78);
+  backdrop-filter: blur(2em) saturate(1.4);
+  -webkit-backdrop-filter: blur(2em) saturate(1.4);
+  border-top: 0.1em solid rgba(255, 255, 255, 0.06);
+  display: flex; align-items: center; justify-content: center; gap: 1.2em;
+}
+.trailer .taskbar i { width: 3em; height: 3em; border-radius: 0.8em; background: rgba(255, 255, 255, 0.14); }
+.trailer .taskbar i:nth-child(1) { background: linear-gradient(135deg, #60a5fa, #2563eb); }
+.trailer .taskbar i:nth-child(2) { background: linear-gradient(135deg, #fbbf24, #d97706); }
+.trailer .taskbar i:nth-child(3) { background: linear-gradient(135deg, #34d399, #059669); }
+.trailer .taskbar i:nth-child(4) { background: linear-gradient(135deg, #f472b6, #db2777); }
+.trailer .tray {
+  position: absolute; right: 2em; top: 0; bottom: 0;
+  display: flex; align-items: center; gap: 1.4em; font-size: 1.3em; color: #cbd5e1;
+}
+.trailer .tray img { width: 1.9em; height: 1.9em; }
+
+/* ---------- Notas ---------- */
+.trailer .n {
+  position: absolute; z-index: 11;
+  border-radius: 1em;
+  overflow: hidden;
+  font-size: 1em;
+  --h: #6b5514; --b: #2a2515; --ink: #fde68a;
+  --hg: rgba(107, 85, 20, 0.62); --bg: rgba(42, 37, 21, 0.4);
+  background: var(--b);
+  color: var(--ink);
+  box-shadow: 0 1.4em 3.4em rgba(0, 0, 0, 0.45);
+  opacity: 0; transform: scale(0.85) translateY(1.2em);
+  transition: opacity 0.45s ease, transform 0.5s cubic-bezier(.2, .9, .3, 1.25), height 0.45s cubic-bezier(.4, 0, .2, 1), background-color 0.8s ease, box-shadow 0.5s ease;
+}
+.trailer .n.vio { --h: #52307f; --b: #201830; --ink: #e9d5ff; --hg: rgba(82, 48, 127, 0.62); --bg: rgba(32, 24, 48, 0.4); }
+.trailer .n.grn { --h: #1d5e3e; --b: #15261c; --ink: #bbf7d0; --hg: rgba(29, 94, 62, 0.62); --bg: rgba(21, 38, 28, 0.4); }
+.trailer .n .bar { /* 40 px de alto, letra de 15 px: medidas en ese tamaño */
+  height: 2.67em; padding: 0 0.93em; background: var(--h);
+  display: flex; align-items: center;
+  font-weight: 600; font-size: 1.5em;
+  transition: background-color 0.8s ease;
+}
+.trailer .n .btns { margin-left: auto; display: flex; gap: 0.9em; opacity: 0.85; font-weight: 400; }
+.trailer .n .body { padding: 0.8em 0.95em; font-size: 1.7em; line-height: 1.55; }
+.trailer .n .row { margin: 0; display: flex; align-items: center; gap: 0.5em; min-height: 1.55em; white-space: nowrap; }
+.trailer .n .cb {
+  flex: none; width: 0.95em; height: 0.95em; border-radius: 0.25em;
+  border: 0.1em solid var(--ink); opacity: 0.85; position: relative;
+  transition: background-color 0.25s ease;
+}
+.trailer .n .cb::after {
+  content: ""; position: absolute; left: 0.28em; top: 0.08em; width: 0.28em; height: 0.52em;
+  border: solid var(--b); border-width: 0 0.12em 0.12em 0; transform: rotate(45deg) scale(0);
+  transition: transform 0.25s cubic-bezier(.2, .9, .3, 1.4);
+}
+.trailer .n .dot { flex: none; width: 0.95em; text-align: center; }
+.trailer .n .row.later { opacity: 0; transition: opacity 0.3s ease; }
+
+/* Enrollada: solo la barra. */
+#t-n1 { left: 9em; top: 7em; width: 30em; height: 25em; }
+#t-n2 { left: 36em; top: 13em; width: 28em; height: 21em; z-index: 12; }
+#t-n3 { left: 70em; top: 5em; width: 20em; height: 4em; }
+
+/* ---------- Ventana de una aplicación (escena del atajo) ---------- */
+.trailer .appwin {
+  position: absolute; left: 7em; right: 7em; top: 4.5em; bottom: 7em; z-index: 30;
+  border-radius: 1em; overflow: hidden;
+  background: #f3f4f6; color: #1f2937;
+  box-shadow: 0 2em 5em rgba(0, 0, 0, 0.5);
+  transform: translateY(135%);
+  transition: transform 0.55s cubic-bezier(.2, .8, .2, 1);
+  display: grid; grid-template-rows: 3.6em 1fr; grid-template-columns: 18em 1fr;
+}
+.trailer .appwin .top { grid-column: 1 / 3; background: #e5e7eb; display: flex; align-items: center; gap: 0.8em; padding: 0 1.6em; }
+.trailer .appwin .top i { width: 1.1em; height: 1.1em; border-radius: 50%; background: #cbd5e1; }
+.trailer .appwin .top span { margin-left: 1.2em; font-size: 1.4em; color: #6b7280; }
+.trailer .appwin .side { background: #eef2f7; padding: 2em 1.6em; display: grid; gap: 1.2em; align-content: start; }
+.trailer .appwin .side b, .trailer .appwin .main b { display: block; height: 1.2em; border-radius: 0.6em; background: #d1d5db; }
+.trailer .appwin .side b:nth-child(1) { background: #93c5fd; width: 70%; }
+.trailer .appwin .main { padding: 2.4em; display: grid; gap: 1.4em; align-content: start; }
+.trailer .appwin .main b:nth-child(1) { height: 2em; width: 55%; background: #9ca3af; }
+.trailer .appwin .main b:nth-child(odd) { width: 92%; }
+.trailer .appwin .main b:nth-child(even) { width: 78%; }
+
+/* ---------- Teclas y selector de notas ---------- */
+.trailer .keys {
+  position: absolute; left: 0; right: 0; top: 3.2em; z-index: 55; /* en em de su letra (2.2) */
+  display: flex; justify-content: center; align-items: center; gap: 1em;
+  font-size: 2.2em; font-weight: 600; color: #f8fafc;
+  opacity: 0; transform: translateY(-0.6em);
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+.trailer .keys kbd {
+  font: inherit; padding: 0.35em 0.7em; border-radius: 0.45em;
+  background: #1f2937; border: 0.06em solid #475569; box-shadow: 0 0.18em 0 #0f172a;
+}
+.trailer .keys span { opacity: 0.7; }
+
+.trailer .picker {
+  position: absolute; left: 30em; top: 13em; width: 36em; z-index: 50;
+  border-radius: 1.2em; background: #1f2023; box-shadow: 0 2em 5em rgba(0, 0, 0, 0.55);
+  border: 0.1em solid #33363d;
+  overflow: hidden;
+  opacity: 0; transform: scale(0.94);
+  transition: opacity 0.25s ease, transform 0.3s cubic-bezier(.2, .9, .3, 1.2);
+}
+.trailer .picker .q {
+  height: 4.6em; display: flex; align-items: center; gap: 1em; padding: 0 1.6em;
+  border-bottom: 0.1em solid #33363d; font-size: 1em;
+}
+.trailer .picker .q .lupa { width: 1.6em; height: 1.6em; border-radius: 50%; border: 0.2em solid #9ca3af; position: relative; flex: none; }
+.trailer .picker .q .lupa::after { content: ""; position: absolute; width: 0.7em; height: 0.2em; background: #9ca3af; right: -0.6em; bottom: -0.35em; transform: rotate(45deg); border-radius: 0.1em; }
+.trailer .picker .q span { font-size: 1.6em; color: #9ca3af; }
+.trailer .picker .q span.typed { color: #f3f4f6; }
+.trailer .picker .list { padding: 0.8em; }
+.trailer .picker .pr {
+  display: flex; align-items: center; gap: 1.2em; padding: 0 1.2em; height: 4.6em;
+  border-radius: 0.8em; overflow: hidden;
+  transition: height 0.3s ease, opacity 0.25s ease, background-color 0.2s ease;
+}
+.trailer .picker .pr i { width: 1.6em; height: 1.6em; border-radius: 0.45em; flex: none; }
+.trailer .picker .pr div { display: grid; line-height: 1.3; }
+.trailer .picker .pr strong { font-size: 1.45em; color: #f3f4f6; font-weight: 600; }
+.trailer .picker .pr small { font-size: 1.15em; color: #9ca3af; }
+.trailer .picker .pr.sel { background: #33363d; }
+
+/* ---------- Mouse ---------- */
+.trailer .cur {
+  position: absolute; left: 0; top: 0; z-index: 60; width: 2.4em; height: 2.4em;
+  transform: translate(84em, 44em); opacity: 0;
+  transition: transform 0.6s cubic-bezier(.45, 0, .2, 1), opacity 0.3s ease;
+}
+.trailer .cur svg { width: 100%; height: 100%; display: block; filter: drop-shadow(0 0.15em 0.25em rgba(0, 0, 0, 0.5)); }
+.trailer .ripple {
+  position: absolute; z-index: 59; width: 3em; height: 3em; margin: -1.5em 0 0 -1.5em; border-radius: 50%;
+  border: 0.25em solid rgba(255, 255, 255, 0.9); opacity: 0; pointer-events: none;
+}
+
+/* ---------- Leyendas ---------- */
+.trailer .cap {
+  position: absolute; left: 1.75em; bottom: 3.2em; z-index: 45; /* en em de su propia letra (2.3) */
+  padding: 0.55em 1.1em; border-radius: 0.7em;
+  background: rgba(10, 12, 20, 0.62);
+  backdrop-filter: blur(1em); -webkit-backdrop-filter: blur(1em);
+  font-size: 2.3em; font-weight: 600; letter-spacing: -0.01em; color: #f8fafc;
+  opacity: 0; transform: translateY(0.5em);
+  transition: opacity 0.35s ease, transform 0.35s ease;
+}
+.trailer .cap small { display: block; font-size: 0.58em; font-weight: 400; color: #cbd5e1; }
+
+/* ---------- Mini barra de formato ---------- */
+.trailer .fmt {
+  position: absolute; left: 17em; top: 17.8em; z-index: 25;
+  display: flex; gap: 0.3em; padding: 0.4em; border-radius: 0.8em;
+  background: #26282c; border: 0.1em solid #3a3d44; box-shadow: 0 1em 2em rgba(0, 0, 0, 0.4);
+  opacity: 0; transform: translateY(0.6em); transition: opacity 0.2s ease, transform 0.25s ease;
+}
+.trailer .fmt b {
+  width: 2.8em; height: 2.8em; border-radius: 0.5em; display: grid; place-items: center;
+  font-size: 1.4em; color: #e5e7eb; font-weight: 700; transition: background-color 0.2s ease;
+}
+.trailer .fmt b:nth-child(2) { font-style: italic; font-weight: 400; }
+.trailer .fmt b:nth-child(3) { text-decoration: underline; font-weight: 400; }
+.trailer .fmt b:nth-child(4) { text-decoration: line-through; font-weight: 400; }
+
+/* ---------- Cierre ---------- */
+.trailer .outro {
+  position: absolute; inset: 0; z-index: 70;
+  display: grid; place-content: center; justify-items: center; text-align: center; gap: 1.4em;
+  background: radial-gradient(60em 40em at 50% 45%, rgba(40, 32, 70, 0.9), rgba(8, 10, 18, 0.97));
+  opacity: 0; transition: opacity 0.55s ease;
+}
+.trailer .outro img { width: 10em; height: 10em; transform: scale(0.6) rotate(-8deg); opacity: 0; transition: transform 0.6s cubic-bezier(.2, .9, .3, 1.4), opacity 0.4s ease; }
+.trailer .outro h3 { margin: 0; font-size: 6.4em; line-height: 1; letter-spacing: -0.02em; color: #fff; opacity: 0; transform: translateY(0.3em); transition: opacity 0.4s ease 0.15s, transform 0.5s ease 0.15s; }
+.trailer .outro p { margin: 0; font-size: 2.2em; color: #cbd5e1; opacity: 0; transition: opacity 0.4s ease 0.35s; }
+.trailer .outro ul { list-style: none; margin: 0.6em 0 0; padding: 0; display: flex; flex-wrap: wrap; justify-content: center; gap: 0.8em; }
+.trailer .outro li {
+  font-size: 1.6em; padding: 0.35em 0.9em; border-radius: 99em; color: #fde68a;
+  background: rgba(253, 230, 138, 0.12); border: 0.06em solid rgba(253, 230, 138, 0.35);
+  opacity: 0; transform: translateY(0.5em); transition: opacity 0.35s ease, transform 0.35s ease;
+}
+.trailer .fade { position: absolute; inset: 0; z-index: 80; background: #0b1020; opacity: 1; transition: opacity 0.5s ease; pointer-events: none; }
+
+/* ---------- Pausa ---------- */
+.trailer .toggle {
+  position: absolute; right: 12px; top: 12px; z-index: 90;
+  width: 34px; height: 34px; border-radius: 50%; border: 0; cursor: pointer;
+  background: rgba(15, 23, 42, 0.55); color: #fff;
+  display: grid; place-items: center; opacity: 0; transition: opacity 0.2s ease;
+}
+.trailer:hover .toggle, .trailer .toggle:focus-visible { opacity: 1; }
+.trailer .toggle::before { content: ""; width: 10px; height: 12px; border-left: 3px solid #fff; border-right: 3px solid #fff; }
+.trailer.paused .toggle { opacity: 1; }
+.trailer.paused .toggle::before { width: 0; height: 0; border: solid transparent; border-width: 7px 0 7px 12px; border-left-color: #fff; margin-left: 3px; }
+
+/* ================= La línea de tiempo (clases que pone trailer.js) ================= */
+
+.stage.c-open .fade { opacity: 0; }
+.stage.c-end .fade { opacity: 1; }
+
+/* 1. Aparece la nota y se escribe la lista */
+.stage.c-n1 #t-n1, .stage.c-n1 #t-n3 { opacity: 1; transform: none; }
+.stage.c-emo .emo { opacity: 1; transform: none; }
+.trailer .emo { display: inline-block; opacity: 0; transform: scale(0.3); transition: opacity 0.2s ease, transform 0.35s cubic-bezier(.2, .9, .3, 1.6); }
+.stage.cap1:not(.cap2) .k1 { opacity: 1; transform: none; }
+
+/* 2. Tildar, negrita, viñeta */
+.stage.c-cur1 .cur { opacity: 1; transform: translate(11.2em, 13.5em); }
+.stage.c-click1 .ripple.r1 { animation: t-ripple 0.5s ease-out; }
+.trailer .ripple.r1 { left: 11.4em; top: 13.7em; }
+.stage.c-check1 .r1 .cb { background: var(--ink); opacity: 1; }
+.stage.c-check1 .r1 .cb::after { transform: rotate(45deg) scale(1); }
+.stage.c-check1 .r1 .txt { text-decoration: line-through; opacity: 0.5; transition: opacity 0.3s ease; }
+.stage.c-cur2 .cur { transform: translate(21em, 16.6em); }
+.stage.c-sel:not(.c-bold) .w-luz { background: rgba(96, 165, 250, 0.45); border-radius: 0.15em; }
+.stage.c-sel:not(.c-fmtoff) .fmt { opacity: 1; transform: none; }
+.stage.c-bold .fmt b:first-child { background: #3f4350; }
+.stage.c-bold .w-luz { font-weight: 700; }
+.stage.c-bullet .row.later { opacity: 1; }
+.stage.cap2:not(.cap3) .k2 { opacity: 1; transform: none; }
+
+/* 3. Vidrio */
+.stage.c-glass .n {
+  background: var(--bg);
+  backdrop-filter: blur(1.8em) saturate(1.6);
+  -webkit-backdrop-filter: blur(1.8em) saturate(1.6);
+}
+.stage.c-glass .n .bar { background: var(--hg); }
+.stage.c-n2 #t-n2 { opacity: 1; transform: none; }
+.stage.c-cur3 .cur { transform: translate(80em, 42em); }
+.stage.cap3:not(.cap4) .k3 { opacity: 1; transform: none; }
+
+/* 4. Se enrollan; la que se abre pasa adelante */
+.stage.c-roll #t-n1, .stage.c-roll #t-n2 { height: 4em; }
+.stage.c-cur4 .cur { transform: translate(18em, 9.2em); }
+.stage.c-roll.c-open1 #t-n1 { height: 25em; z-index: 13; box-shadow: 0 1.6em 4em rgba(0, 0, 0, 0.55); }
+.stage.cap4:not(.cap5) .k4 { opacity: 1; transform: none; }
+
+/* 5. Ctrl+Alt+N, sobre una aplicación */
+.stage.c-app .appwin { transform: none; }
+.stage.c-app .cur { opacity: 0; }
+.stage.c-keys:not(.c-pick) .keys { opacity: 1; transform: none; }
+.stage.c-keys:not(.c-pick) .keys kbd { animation: t-press 0.35s ease 0.1s; }
+.stage.c-picker:not(.c-pick) .picker { opacity: 1; transform: none; }
+.stage.c-filter .pr:not(.pr-ideas) { height: 0; opacity: 0; }
+.stage.c-filter .pr.pr-ideas { background: #33363d; }
+.stage.c-filter .pr.sel:not(.pr-ideas) { background: transparent; }
+.stage.c-roll.c-pick #t-n2 { height: 21em; z-index: 40; box-shadow: 0 0 0 0.25em rgba(233, 213, 255, 0.55), 0 2em 5em rgba(0, 0, 0, 0.6); }
+.stage.cap5:not(.c-outro) .k5 { opacity: 1; transform: none; }
+
+/* 6. Cierre */
+.stage.c-outro .outro { opacity: 1; }
+.stage.c-outro .outro img { opacity: 1; transform: none; }
+.stage.c-outro .outro h3 { opacity: 1; transform: none; }
+.stage.c-outro .outro p { opacity: 1; }
+.stage.c-chips .outro li { opacity: 1; transform: none; }
+.stage.c-chips .outro li:nth-child(2) { transition-delay: 0.08s; }
+.stage.c-chips .outro li:nth-child(3) { transition-delay: 0.16s; }
+.stage.c-chips .outro li:nth-child(4) { transition-delay: 0.24s; }
+
+@keyframes t-ripple {
+  from { opacity: 0.9; transform: scale(0.4); }
+  to { opacity: 0; transform: scale(1.4); }
+}
+@keyframes t-press {
+  50% { transform: translateY(0.14em); box-shadow: 0 0.04em 0 #0f172a; }
+}

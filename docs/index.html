@@ -7,6 +7,7 @@
 <meta name="description" content="Notas adhesivas ultraligeras que viven en el escritorio de Windows 11, con sincronización opcional entre compus a través de tu Google Drive.">
 <link rel="icon" type="image/png" href="assets/favicon.png">
 <link rel="stylesheet" href="assets/estilo.css">
+<link rel="stylesheet" href="assets/trailer.css">
 </head>
 <body>
 <div class="wrap">
@@ -25,9 +26,73 @@
     <p class="lead">
       Simpcky es una app chiquita para Windows 11: tus notas quedan pegadas
       al escritorio como widgets, con la forma de siempre de una nota
-      adhesiva, sin tapar lo que estás usando. Nativa, de menos de 400&nbsp;KB,
+      adhesiva, sin tapar lo que estás usando. Nativa, de menos de 500&nbsp;KB,
       sin publicidad y sin telemetría.
     </p>
+
+    <figure class="trailer" role="img" aria-label="Tráiler de Simpcky, 15 segundos: una nota en el escritorio con una lista de tareas, formato y emojis; las notas se vuelven translúcidas, se enrollan solas y la que se abre pasa adelante; con Ctrl+Alt+N una nota aparece encima de otra aplicación.">
+      <div class="stage" aria-hidden="true">
+        <div class="wall"></div>
+
+        <div class="n grn" id="t-n3"><div class="bar"><span>Compras</span></div></div>
+
+        <div class="n" id="t-n1">
+          <div class="bar"><span data-type="0.75 0.3">Hoy</span><span class="btns"><span>+</span><span>⋯</span></span></div>
+          <div class="body">
+            <p class="row r1"><i class="cb"></i><span class="txt" data-type="1.05 0.55">Llamar a Ana</span></p>
+            <p class="row r2"><i class="cb"></i><span data-type="1.65 0.4">Pagar la </span><span class="w-luz" data-type="2.05 0.2">luz</span></p>
+            <p class="row r3"><i class="cb"></i><span data-type="2.3 0.55">Comprar café</span><span class="emo">☕</span></p>
+            <p class="row later"><span class="dot">•</span><span data-type="5.3 0.5">Turno con el dentista</span></p>
+          </div>
+        </div>
+
+        <div class="n vio" id="t-n2">
+          <div class="bar"><span>Ideas</span><span class="btns"><span>+</span><span>⋯</span></span></div>
+          <div class="body">
+            <p class="row"><span class="dot">•</span><span data-type="6.7 0.6">Tráiler de 15 segundos</span></p>
+            <p class="row"><span class="dot">•</span><span data-type="7.3 0.5">Mostrar el vidrio ✨</span></p>
+          </div>
+        </div>
+
+        <div class="appwin">
+          <div class="top"><i></i><i></i><i></i><span>Correo — Bandeja de entrada</span></div>
+          <div class="side"><b></b><b></b><b></b><b></b><b></b></div>
+          <div class="main"><b></b><b></b><b></b><b></b><b></b><b></b><b></b></div>
+        </div>
+
+        <div class="fmt"><b>B</b><b>I</b><b>U</b><b>S</b></div>
+
+        <div class="keys"><kbd>Ctrl</kbd><span>+</span><kbd>Alt</kbd><span>+</span><kbd>N</kbd></div>
+        <div class="picker">
+          <div class="q"><i class="lupa"></i><span class="typed" data-type="11.4 0.25">id</span></div>
+          <div class="list">
+            <div class="pr sel"><i style="background:#6b5514"></i><div><strong>Hoy</strong><small>Llamar a Ana · Pagar la luz</small></div></div>
+            <div class="pr pr-ideas"><i style="background:#52307f"></i><div><strong>Ideas</strong><small>Tráiler de 15 segundos</small></div></div>
+            <div class="pr"><i style="background:#1d5e3e"></i><div><strong>Compras</strong><small>Pan · Leche · Café</small></div></div>
+          </div>
+        </div>
+
+        <div class="taskbar"><i></i><i></i><i></i><i></i><div class="tray"><img src="assets/icono.png" alt=""><span>10:24</span></div></div>
+
+        <div class="cap k1">Notas que viven en tu escritorio</div>
+        <div class="cap k2">Listas, formato y emojis</div>
+        <div class="cap k3">Translúcidas<small>con el mod Translucent Windows de Windhawk</small></div>
+        <div class="cap k4">Se enrollan solas<small>y la que abrís pasa adelante</small></div>
+        <div class="cap k5">Ctrl + Alt + N<small>cualquier nota, al frente</small></div>
+
+        <div class="ripple r1"></div>
+        <div class="cur"><svg viewBox="0 0 24 24"><path d="M3 2l15 11.5-6.6.9 3.9 7.6-2.9 1.4-3.8-7.7L3 20z" fill="#fff" stroke="#111" stroke-width="1.3" stroke-linejoin="round"/></svg></div>
+
+        <div class="outro">
+          <img src="assets/icono.png" alt="">
+          <h3>Simpcky</h3>
+          <p>Notas adhesivas para Windows 11</p>
+          <ul><li>Gratis</li><li>Nativa, menos de 500 KB</li><li>Sin telemetría</li><li>Sincroniza con tu Drive</li></ul>
+        </div>
+        <div class="fade"></div>
+      </div>
+      <button class="toggle" type="button" aria-label="Pausar el tráiler"></button>
+    </figure>
 
     <div class="actions">
       <a class="button" data-gh="/releases/latest" href="https://github.com/">Descargar</a>
@@ -109,5 +174,6 @@
     });
   })();
 </script>
+<script src="assets/trailer.js"></script>
 </body>
 </html>
