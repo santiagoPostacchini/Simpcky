@@ -214,9 +214,6 @@ pub const ID_LAST: u32 = 3099;
 
 struct EditState {
     doc: *mut c_void,
-    /// `ITextServices` del RichEdit: para dibujarlo en un lienzo aparte (ver
-    /// `paint_buffered`). Nulo si no se pudo obtener.
-    services: *mut c_void,
     body: u32,
     ink: u32,
     /// El WM_CHAR que sigue a una tecla que ya se resolvió acá (Enter,
@@ -301,19 +298,14 @@ pub fn create(parent: HWND, hinstance: HINSTANCE, id: usize, rc: RECT) -> HWND {
         send(edit, EM_SETEVENTMASK, 0, ENM_CHANGE);
         let mut ole: *mut c_void = null_mut();
         let mut doc: *mut c_void = null_mut();
-        let mut services: *mut c_void = null_mut();
         if send(edit, EM_GETOLEINTERFACE, 0, &mut ole as *mut *mut c_void as isize) != 0 && !ole.is_null() {
             let qi: unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> i32 = method(ole, 0);
             qi(ole, &IID_ITEXTDOCUMENT, &mut doc);
-            if let Some(iid) = iid_text_services() {
-                qi(ole, &iid, &mut services);
-            }
             com_release(ole);
         }
         EDITS.with(|m| {
             m.borrow_mut().insert(edit as isize, EditState {
                     doc,
-                    services,
                     body: 0xffffff,
                     ink: 0,
                     swallow: None,
@@ -339,18 +331,6 @@ unsafe fn com_release(obj: *mut c_void) {
     if !obj.is_null() {
         let f: unsafe extern "system" fn(*mut c_void) -> u32 = method(obj, 2);
         f(obj);
-    }
-}
-
-/// El IID de `ITextServices` lo exporta Msftedit.dll (no es el mismo que el
-/// del RichEdit viejo, así que no se escribe a mano).
-fn iid_text_services() -> Option<GUID> {
-    unsafe {
-        let lib = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(wide("Msftedit.dll").as_ptr());
-        if lib.is_null() {
-            return None;
-        }
-        windows_sys::Win32::System::LibraryLoader::GetProcAddress(lib, b"IID_ITextServices\0".as_ptr()).map(|p| *(p as *const GUID))
     }
 }
 
@@ -1175,53 +1155,8 @@ unsafe fn paint_overlay(edit: HWND) {
     if IsWindowVisible(edit) == 0 {
         return; // nota enrollada
     }
-    let hdc = GetDC(edit);
-    HideCaret(edit);
-    draw_marks(edit, hdc);
-    draw_bar(edit, hdc);
-    ShowCaret(edit);
-    ReleaseDC(edit, hdc);
-}
-
-/// WM_PAINT sin parpadeo: el fondo, el texto (con `ITextServices::TxDraw`,
-/// que dibuja en cualquier DC; el RichEdit no atiende WM_PRINTCLIENT), las
-/// casillas, los emojis y la barra, todo en un lienzo aparte que se copia a
-/// la pantalla de una vez. Antes el fondo se pintaba directo y el texto
-/// después: al escribir, la línea se veía vacía un instante (y en vidrio,
-/// con el desenfoque detrás, "vibraba"). `false`: no hay `ITextServices`,
-/// se pinta como antes.
-unsafe fn paint_buffered(edit: HWND) -> bool {
-    let services = with_state(edit, |s| s.services).unwrap_or(null_mut());
-    if services.is_null() {
-        return false;
-    }
-    let mut ps: PAINTSTRUCT = std::mem::zeroed();
-    let hdc = BeginPaint(edit, &mut ps);
-    let mut client = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-    GetClientRect(edit, &mut client);
-    let upd = ps.rcPaint;
-    if let Some(c) = crate::glass::Canvas::new(client.right, client.bottom).filter(|_| upd.right > upd.left && upd.bottom > upd.top) {
-        let (_, body) = colors(edit);
-        c.fill(client, body, glass(edit).unwrap_or(255));
-        type TxDraw = unsafe extern "system" fn(*mut c_void, u32, i32, *mut c_void, *mut c_void, HDC, HDC, *const RECT, *const RECT, *mut RECT, *mut c_void, u32, i32) -> i32;
-        let draw: TxDraw = method(services, 4);
-        let mut clip = upd;
-        // DVASPECT_CONTENT, la vista activa (la del control).
-        draw(services, 1, 0, null_mut(), null_mut(), c.dc, null_mut(), &client, null(), &mut clip, null_mut(), 0, 0);
-        if IsWindowVisible(edit) != 0 {
-            draw_marks(edit, c.dc);
-            draw_bar(edit, c.dc);
-        }
-        GdiFlush();
-        BitBlt(hdc, upd.left, upd.top, upd.right - upd.left, upd.bottom - upd.top, c.dc, upd.left, upd.top, SRCCOPY);
-    }
-    EndPaint(edit, &ps);
-    // La barra entera, no solo lo que cayó en la zona repintada: al
-    // desplazar, el RichEdit corre el pulgar viejo junto con el texto.
-    if IsWindowVisible(edit) != 0 {
-        paint_bar(edit);
-    }
-    true
+    paint_marks(edit);
+    paint_bar(edit);
 }
 
 // -----------------------------------------------------------------
@@ -1281,14 +1216,9 @@ fn bar(edit: HWND) -> (RECT, Option<Bar>) {
 /// RichEdit desplaza la ventana) y dibuja el pulgar donde va: una
 /// rayita del color de la tinta, más ancha con el mouse encima.
 unsafe fn paint_bar(edit: HWND) {
-    let hdc = GetDC(edit);
-    draw_bar(edit, hdc);
-    ReleaseDC(edit, hdc);
-}
-
-unsafe fn draw_bar(edit: HWND, hdc: HDC) {
     let (strip, bar) = bar(edit);
     let (ink, body) = colors(edit);
+    let hdc = GetDC(edit);
     let thumb = bar.map(|b| {
         let (hover, drag) = with_state(edit, |s| (s.bar_hover, s.bar_drag.is_some())).unwrap_or((false, false));
         let wide = hover || drag;
@@ -1309,6 +1239,7 @@ unsafe fn draw_bar(edit: HWND, hdc: HDC) {
         }
         c.blit(hdc, strip.left, strip.top);
     }
+    ReleaseDC(edit, hdc);
 }
 
 /// Lleva el pulgar a que su borde de arriba quede en `top`.
@@ -1335,10 +1266,10 @@ fn on_bar(edit: HWND, x: i32) -> Option<Bar> {
     }
 }
 
-unsafe fn draw_marks(edit: HWND, hdc: HDC) {
+unsafe fn paint_marks(edit: HWND) {
     let text = units(edit);
     if text.is_empty() {
-        draw_placeholder(edit, hdc);
+        paint_placeholder(edit);
         return;
     }
     let clusters = richtext::emoji_clusters(&text);
@@ -1350,7 +1281,8 @@ unsafe fn draw_marks(edit: HWND, hdc: HDC) {
     let mut clip = RECT { left: 0, top: 0, right: 0, bottom: 0 };
     send(edit, EM_GETRECT, 0, &mut clip as *mut RECT as isize);
     let em = em_px(edit);
-    let saved = SaveDC(hdc);
+    let hdc = GetDC(edit);
+    HideCaret(edit);
     IntersectClipRect(hdc, clip.left, clip.top, clip.right, clip.bottom);
 
     for (a, done) in todos {
@@ -1400,21 +1332,27 @@ unsafe fn draw_marks(edit: HWND, hdc: HDC) {
         };
         crate::d2d::draw_emoji(hdc, cell, clip, &text[a..b], em as u32, bg);
     }
-    RestoreDC(hdc, saved);
+
+    ShowCaret(edit);
+    ReleaseDC(edit, hdc);
 }
 
 /// Una nota vacía no es un rectángulo en blanco: muestra en gris qué va
 /// ahí y cómo empezar una lista.
-unsafe fn draw_placeholder(edit: HWND, hdc: HDC) {
+unsafe fn paint_placeholder(edit: HWND) {
     let (ink, body) = colors(edit);
     let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
     send(edit, EM_GETRECT, 0, &mut rc as *mut RECT as isize);
+    let hdc = GetDC(edit);
+    HideCaret(edit);
     let old = SelectObject(hdc, flyout::font(-em_px(edit), 400, 0, "Segoe UI"));
     SetBkMode(hdc, TRANSPARENT as i32);
     SetTextColor(hdc, faded(ink, body));
     let hint = wide("Escribí una nota…\r\n\r\n[] y un espacio: lista de tareas\r\n- y un espacio: viñetas");
     DrawTextW(hdc, hint.as_ptr(), -1, &mut rc, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
     SelectObject(hdc, old);
+    ShowCaret(edit);
+    ReleaseDC(edit, hdc);
 }
 
 /// Una casilla redondeada en lugar del ☐/☑ de la fuente, centrada en
@@ -1471,9 +1409,6 @@ fn ctrl() -> bool {
 unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _id: usize, _data: usize) -> LRESULT {
     match msg {
         WM_PAINT => {
-            if paint_buffered(edit) {
-                return 0;
-            }
             paint_background(edit);
             let r = DefSubclassProc(edit, msg, wparam, lparam);
             paint_overlay(edit);
@@ -1677,10 +1612,9 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
         }
         WM_NCDESTROY => {
             crate::seltool::hide_for(edit);
-            let state = EDITS.with(|m| m.borrow_mut().remove(&(edit as isize)));
-            if let Some(s) = state {
-                com_release(s.services);
-                com_release(s.doc);
+            let doc = EDITS.with(|m| m.borrow_mut().remove(&(edit as isize)).map(|s| s.doc));
+            if let Some(doc) = doc {
+                com_release(doc);
             }
             RemoveWindowSubclass(edit, Some(subclass_proc), 1);
             DefSubclassProc(edit, msg, wparam, lparam)
@@ -1799,54 +1733,4 @@ unsafe fn paint_background(edit: HWND) {
 pub fn set_padding(edit: HWND, w: i32, h: i32, pad_x: i32, pad_y: i32) {
     let mut rc = RECT { left: pad_x, top: pad_y, right: (w - pad_x).max(pad_x), bottom: (h - pad_y).max(pad_y) };
     unsafe { send(edit, EM_SETRECT, 0, &mut rc as *mut RECT as isize) };
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `paint_buffered` depende de que el RichEdit se dibuje en un DC
-    /// cualquiera con `TxDraw`, en el lugar correcto (con el margen) y con
-    /// la selección. Abre una ventana casi invisible: por eso, aparte.
-    #[test]
-    #[ignore]
-    fn richedit_se_dibuja_en_un_lienzo() {
-        unsafe {
-            crate::note::load_richedit_library();
-            let cls = wide("STATIC");
-            let host = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE, cls.as_ptr(), null(), WS_POPUP, 0, 0, 400, 300, null_mut(), null_mut(), null_mut(), null());
-            SetLayeredWindowAttributes(host, 0, 1, LWA_ALPHA);
-            let edit = create(host, null_mut(), 1, RECT { left: 0, top: 0, right: 400, bottom: 300 });
-            set_padding(edit, 400, 300, 30, 0);
-            let t = wide("hola mundo");
-            send(edit, WM_SETTEXT, 0, t.as_ptr() as isize);
-            send(edit, WM_USER + 77, 2, 0x0100); // EM_SETOPTIONS, ECOOP_OR, ECO_NOHIDESEL
-            select(edit, 0, 4);
-            ShowWindow(host, SW_SHOWNOACTIVATE);
-            let services = with_state(edit, |s| s.services).unwrap();
-            assert!(!services.is_null(), "sin ITextServices");
-            let mut client = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-            GetClientRect(edit, &mut client);
-            let c = crate::glass::Canvas::new(client.right, client.bottom).unwrap();
-            c.fill(client, 0x0000_ff00, 255);
-            type TxDraw = unsafe extern "system" fn(*mut c_void, u32, i32, *mut c_void, *mut c_void, HDC, HDC, *const RECT, *const RECT, *mut RECT, *mut c_void, u32, i32) -> i32;
-            let draw: TxDraw = method(services, 4);
-            let mut clip = client;
-            assert_eq!(draw(services, 1, 0, null_mut(), null_mut(), c.dc, null_mut(), &client, null(), &mut clip, null_mut(), 0, 0), 0);
-            GdiFlush();
-            let mut ds: DIBSECTION = std::mem::zeroed();
-            GetObjectW(GetCurrentObject(c.dc, OBJ_BITMAP as u32), std::mem::size_of::<DIBSECTION>() as i32, &mut ds as *mut DIBSECTION as *mut c_void);
-            let bits = std::slice::from_raw_parts(ds.dsBm.bmBits as *const u32, (client.right * client.bottom) as usize);
-            let w = client.right as usize;
-            let first_x = bits.iter().enumerate().filter(|(_, &p)| p & 0xffffff != 0x00ff00).map(|(i, _)| i % w).min();
-            let hl = GetSysColor(COLOR_HIGHLIGHT);
-            let hl = ((hl & 0xff) << 16) | (hl & 0xff00) | ((hl >> 16) & 0xff);
-            let selected = bits.iter().filter(|&&p| p & 0xffffff == hl).count();
-            let text_x = pos(edit, 0).x;
-            DestroyWindow(host);
-            assert_eq!(text_x, 30);
-            assert_eq!(first_x, Some(text_x as usize), "el texto no cae donde dice el RichEdit");
-            assert!(selected > 0, "no dibujó la selección");
-        }
-    }
 }

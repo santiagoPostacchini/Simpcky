@@ -28,10 +28,6 @@
   barra de desplazamiento, se pinta solo el rectángulo que cambió, y la barra y
   las casillas se dibujan en un lienzo aparte y se copian de una vez.
   (`fix/candado-y-parpadeo`)
-- Claude — Parpadeo de la línea que se escribe: el texto se dibuja con
-  `ITextServices::TxDraw` en un lienzo junto con fondo, casillas, emojis y barra,
-  y se copia a la pantalla de una vez. Si no hay `ITextServices`, se pinta como
-  antes. Prueba: `cargo test -- --ignored richedit_se_dibuja`. (`fix/parpadeo-linea`)
 
 ## Pendiente
 
