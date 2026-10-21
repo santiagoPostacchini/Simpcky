@@ -336,7 +336,7 @@ pub fn spawn_note_at(x: i32, y: i32) {
     let hwnd = note::create_note(data);
     if !hwnd.is_null() {
         save_all();
-        note::open_note(hwnd);
+        note::open_note(hwnd, false);
     }
 }
 

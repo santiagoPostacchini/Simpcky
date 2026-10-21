@@ -996,7 +996,7 @@ fn duplicate_note(hwnd: HWND) {
     save_all();
     // Igual que una nota nueva: al frente, a la vista.
     if !dup.is_null() {
-        open_note(dup);
+        open_note(dup, false);
     }
 }
 
@@ -1035,7 +1035,6 @@ fn set_layer(hwnd: HWND, layer: Layer) {
                 let was_top = nr.data.layer == Layer::AlwaysOnTop;
                 let peeking = nr.peeking;
                 nr.data.layer = if to_top { Layer::AlwaysOnTop } else { Layer::Desktop };
-                nr.peeking = false;
                 (was_top, peeking)
             }
             None => return,
@@ -1059,6 +1058,17 @@ fn set_layer(hwnd: HWND, layer: Layer) {
 fn switch_layer_window(hwnd: HWND, to_top: bool) {
     unsafe {
         if to_top {
+            let id = note_id(hwnd);
+            let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            let positioned = GetWindowRect(hwnd, &mut rc) != 0;
+            if let Some(nr) = app().lock().unwrap().notes.get_mut(&id) {
+                if nr.peeking && positioned {
+                    // Al subir de capa, se queda donde se estaba usando.
+                    nr.data.x = rc.left;
+                    nr.data.y = rc.top;
+                }
+                nr.peeking = false;
+            }
             KillTimer(hwnd, TIMER_DESKTOP_WATCH);
             KillTimer(hwnd, TIMER_PEEK_END);
             if crate::glass::active() {
@@ -1174,11 +1184,18 @@ pub fn delete_silently(id: u32) {
 /// hasta que se pueda).
 fn anchor_widget(hwnd: HWND) {
     let id = note_id(hwnd);
-    {
+    let restore = {
         let mut a = app().lock().unwrap();
-        if let Some(nr) = a.notes.get_mut(&id) {
+        a.notes.get_mut(&id).and_then(|nr| {
+            let restore = nr.peeking.then_some((nr.data.x, nr.data.y, nr.data.w));
             nr.peeking = false;
-        }
+            restore
+        })
+    };
+    if let Some((x, y, w)) = restore {
+        // Vuelve al lugar guardado, sin corregir el dato por este monitor.
+        let (x, y) = clamp_to_work_area(x, y, w, header_h(hwnd));
+        crate::desktop::move_to_screen(hwnd, x, y);
     }
     unsafe {
         KillTimer(hwnd, TIMER_PEEK_END);
@@ -1350,7 +1367,7 @@ fn show_hidden(id: u32, at: Option<(i32, i32)>) -> HWND {
 pub fn open_by_id(id: u32) -> HWND {
     let hwnd = show_hidden(id, None);
     if !hwnd.is_null() {
-        open_note(hwnd);
+        open_note(hwnd, true);
     }
     hwnd
 }
@@ -1392,7 +1409,9 @@ pub fn flush_all() {
 /// una ventana normal mientras se la usa, y apenas se hace clic en
 /// cualquier otra cosa vuelve sola a su lugar detrás de los íconos
 /// (ver `TIMER_PEEK_END`).
-pub fn open_note(hwnd: HWND) {
+/// Con `at_cursor`, empieza a asomarse bajo el mouse sin cambiar su
+/// posición guardada; al volver al escritorio recupera ese lugar.
+pub fn open_note(hwnd: HWND, at_cursor: bool) {
     let id = note_id(hwnd);
     let (unroll, widget, peeking, edit) = {
         let mut a = app().lock().unwrap();
@@ -1422,6 +1441,16 @@ pub fn open_note(hwnd: HWND) {
             // adelante (ver WM_WINDOWPOSCHANGING).
             if !crate::glass::active() {
                 crate::desktop::detach(hwnd);
+            }
+            if at_cursor {
+                let mut pt = POINT { x: 0, y: 0 };
+                let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                if GetCursorPos(&mut pt) != 0 && GetWindowRect(hwnd, &mut rc) != 0 {
+                    let w = rc.right - rc.left;
+                    let header = header_h(hwnd);
+                    let (x, y) = clamp_to_work_area(pt.x - w / 2, pt.y - header / 2, w, header);
+                    crate::desktop::move_to_screen(hwnd, x, y);
+                }
             }
         }
         ShowWindow(hwnd, SW_SHOW);
@@ -1455,7 +1484,7 @@ pub fn drop_on_desktop(hwnd: HWND, x: i32, y: i32) {
     // ve ahí, la ventana que aparece en ese punto es la propia nota
     // (hija del escritorio); si no, es lo que la tapa.
     if !crate::desktop::is_desktop_visible_at(x + px(hwnd, 24), y + header_h(hwnd) / 2) {
-        open_note(hwnd);
+        open_note(hwnd, false);
     }
 }
 
