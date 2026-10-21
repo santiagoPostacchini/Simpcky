@@ -383,6 +383,7 @@ pub fn set_title(hwnd: HWND, title: &str) {
             None => return,
         }
     }
+    crate::trace::rect("set_title", hwnd, None);
     unsafe { InvalidateRect(hwnd, null(), 1) };
     save_all();
 }
@@ -546,8 +547,10 @@ fn invalidate_header(hwnd: HWND) {
     unsafe {
         GetClientRect(hwnd, &mut rc);
         rc.bottom = header_h(hwnd);
+        crate::trace::rect("invalidate_header", hwnd, Some(&rc));
         InvalidateRect(hwnd, &rc, 0);
         let grip = grip_rect(hwnd);
+        crate::trace::rect("invalidate_header", hwnd, Some(&grip));
         InvalidateRect(hwnd, &grip, 0);
     }
 }
@@ -708,6 +711,7 @@ fn on_paint(hwnd: HWND) {
     unsafe {
         let mut ps: PAINTSTRUCT = std::mem::zeroed();
         let hdc = BeginPaint(hwnd, &mut ps);
+        crate::trace::rect("note.WM_PAINT", hwnd, Some(&ps.rcPaint));
         paint(hwnd, hdc);
         EndPaint(hwnd, &ps);
     }
@@ -839,6 +843,7 @@ fn apply_rolled_state(hwnd: HWND, edit: HWND, w: i32, full_h: i32, rolled: bool)
         if !edit.is_null() {
             ShowWindow(edit, if rolled { SW_HIDE } else { SW_SHOW });
         }
+        crate::trace::rect("apply_rolled_state", hwnd, None);
         InvalidateRect(hwnd, null(), 1);
     }
 }
@@ -1032,6 +1037,7 @@ fn set_color(hwnd: HWND, idx: u8) {
         }
     };
     apply_body_style(edit, idx);
+    crate::trace::rect("set_color", hwnd, None);
     unsafe { InvalidateRect(hwnd, null(), 1) };
     save_all();
 }
@@ -1119,6 +1125,7 @@ fn switch_layer_window(hwnd: HWND, to_top: bool) {
         if active && GetForegroundWindow() != hwnd {
             SetForegroundWindow(hwnd);
         }
+        crate::trace::rect("switch_layer_window", hwnd, None);
         InvalidateRect(hwnd, null(), 1);
     }
 }
@@ -1171,6 +1178,7 @@ pub fn apply_remote(new: NoteData) {
         if (old.w, old.h, old.rolled) != (new.w, new.h, new.rolled) {
             apply_rolled_state(hwnd, edit, new.w, new.h, new.rolled);
         }
+        crate::trace::rect("apply_remote", hwnd, None);
         InvalidateRect(hwnd, null(), 1);
     }
 }
@@ -1570,6 +1578,7 @@ pub fn apply_theme_all() {
             // En modo vidrio, la opacidad depende también del tema.
             editor::set_glass(edit, crate::glass::opacity().map(|(_, b)| b));
         }
+        crate::trace::rect("apply_theme_all", hwnd, None);
         unsafe { InvalidateRect(hwnd, null(), 1) };
     }
     flyout::close();
@@ -1728,6 +1737,7 @@ fn on_size(hwnd: HWND, lparam: LPARAM) {
     // Windows muestra la parte nueva de la ventana antes de que la app la
     // pinte (en blanco, o la imagen vieja estirada), y el WM_PAINT recién
     // llegaba cuando el mouse se quedaba quieto.
+    crate::trace::rect("on_size", hwnd, None);
     unsafe { RedrawWindow(hwnd, null(), null_mut(), RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_ALLCHILDREN) };
 }
 
@@ -1994,6 +2004,7 @@ pub fn refresh_glass() {
         if !edit.is_null() {
             editor::set_glass(edit, body);
         }
+        crate::trace::rect("refresh_glass", h, None);
         unsafe { RedrawWindow(h, null(), null_mut(), RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW) };
     }
 }
@@ -2527,6 +2538,7 @@ fn on_command(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
                 let id = note_id(hwnd);
                 let auto = app().lock().unwrap().notes.get(&id).is_some_and(|nr| nr.data.roll_mode == RollMode::Auto);
                 set_roll_mode(hwnd, if auto { RollMode::Manual } else { RollMode::Auto });
+                crate::trace::rect("on_command", hwnd, None);
                 unsafe { InvalidateRect(hwnd, null(), 0) };
             }
             ID_DELETE_NOTE => confirm_delete(hwnd),
@@ -2652,6 +2664,7 @@ pub unsafe extern "system" fn note_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM,
             0
         }
         WM_ERASEBKGND => {
+            crate::trace::rect("note.WM_ERASEBKGND", hwnd, None);
             on_erase(hwnd, wparam as HDC);
             1
         }
@@ -2723,6 +2736,7 @@ pub unsafe extern "system" fn note_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM,
         WM_DPICHANGED => {
             let r = &*(lparam as *const RECT);
             SetWindowPos(hwnd, null_mut(), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
+            crate::trace::rect("note_wndproc", hwnd, None);
             InvalidateRect(hwnd, null(), 1);
             0
         }

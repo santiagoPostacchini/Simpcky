@@ -1172,6 +1172,7 @@ fn line_bottom(edit: HWND, cp: usize, top: i32) -> i32 {
 }
 
 unsafe fn paint_overlay(edit: HWND) {
+    crate::trace::rect("paint_overlay", edit, None);
     if IsWindowVisible(edit) == 0 {
         return; // nota enrollada
     }
@@ -1281,6 +1282,7 @@ fn bar(edit: HWND) -> (RECT, Option<Bar>) {
 /// RichEdit desplaza la ventana) y dibuja el pulgar donde va: una
 /// rayita del color de la tinta, más ancha con el mouse encima.
 unsafe fn paint_bar(edit: HWND) {
+    crate::trace::rect("paint_bar", edit, None);
     let hdc = GetDC(edit);
     draw_bar(edit, hdc);
     ReleaseDC(edit, hdc);
@@ -1469,8 +1471,12 @@ fn ctrl() -> bool {
 }
 
 unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _id: usize, _data: usize) -> LRESULT {
+    if matches!(msg, WM_KEYDOWN | WM_CHAR | WM_KEYUP) {
+        crate::trace::key(match msg { WM_KEYDOWN => "WM_KEYDOWN", WM_CHAR => "WM_CHAR", _ => "WM_KEYUP" }, edit, wparam);
+    }
     match msg {
         WM_PAINT => {
+            crate::trace::update("editor.WM_PAINT", edit);
             if paint_buffered(edit) {
                 return 0;
             }
@@ -1780,6 +1786,7 @@ unsafe fn fill_bg(edit: HWND, hdc: HDC, r: RECT) {
 /// entera `paint_bar` al terminar, y borrarla acá hacía parpadear el
 /// pulgar con cada tecla.
 unsafe fn paint_background(edit: HWND) {
+    crate::trace::rect("paint_background", edit, None);
     let rgn = CreateRectRgn(0, 0, 0, 0);
     let kind = GetUpdateRgn(edit, rgn, 0);
     if kind != NULLREGION && kind != RGN_ERROR {

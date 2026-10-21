@@ -27,6 +27,7 @@ mod shell;
 mod sync;
 mod theme;
 mod tray;
+mod trace;
 mod update;
 mod welcome;
 mod win;
@@ -54,6 +55,8 @@ fn main() {
     // otra instancia). Sin esto Windows escala las ventanas por
     // nosotros y el dibujo a mano queda borroso o desalineado.
     unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+
+    trace::init();
 
     // `--new`: lo manda "Nueva nota adhesiva" del clic derecho del
     // escritorio (ver `shell.rs`).
@@ -119,10 +122,10 @@ fn main() {
     // Integración con el shell. Se reescribe en cada arranque a
     // propósito: si el .exe cambió de carpeta, las rutas se corrigen
     // solas.
-    if settings.desktop_menu {
+    if !app::is_test_instance() && settings.desktop_menu {
         shell::register_desktop_menu();
     }
-    shell::refresh_autostart_path();
+    if !app::is_test_instance() { shell::refresh_autostart_path(); }
 
     note::load_richedit_library();
     note::register_class(hinstance);
@@ -150,12 +153,14 @@ fn main() {
     // Otra vez, ya con todo creado: al arrancar, Windows puede activar
     // una nota y subir todas (ver `note::settle_widgets`).
     note::settle_later();
-    sync::on_startup();
-    update::on_startup();
+    if !app::is_test_instance() {
+        sync::on_startup();
+        update::on_startup();
+    }
 
     // Primera vez en esta compu (no había ajustes guardados): la
     // bienvenida, con lo que conviene decidir de entrada.
-    if first_settings || want_welcome {
+    if !app::is_test_instance() && (first_settings || want_welcome) {
         welcome::show();
     }
 
@@ -198,7 +203,7 @@ fn main() {
 /// `true` si esta es la única instancia (y se queda con el mutex hasta
 /// que el proceso termine).
 fn claim_single_instance() -> bool {
-    let name = wide("Local\\Simpcky.SingleInstance");
+    let name = wide(&app::test_instance().map_or_else(|| "Local\\Simpcky.SingleInstance".to_owned(), |v| format!("Local\\Simpcky.SingleInstance.{v}")));
     unsafe {
         let handle = CreateMutexW(null(), 0, name.as_ptr());
         // El handle no se cierra nunca a propósito: el mutex tiene que
@@ -236,7 +241,7 @@ fn forward_to_running_instance(want_new: bool) {
 /// La ventana controladora de la instancia que ya está corriendo (con
 /// un poco de espera, por si justo está arrancando).
 fn find_controller() -> HWND {
-    let class = wide(tray::CONTROLLER_CLASS);
+    let class = wide(&tray::controller_class());
     unsafe {
         for _ in 0..30 {
             let controller = FindWindowW(class.as_ptr(), null());

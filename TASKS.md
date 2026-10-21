@@ -49,3 +49,13 @@
 - `crypto::tests::dpapi_roundtrip` falla dentro del sandbox de Codex; fuera de
   él pasa.
 - Faltan `CONTEXT.md` y `ARCHITECTURE.md` (correr `ai-init`).
+
+## Medir parpadeo (Codex, hecho en `codex/medir-parpadeo`)
+- Instancia aislada por `SIMPCKY_INSTANCIA`; sin shell, arranque de sync/update, bienvenida ni atajo global.
+- `SIMPCKY_PAINT_LOG` registra dibujo y teclas con QPC; no se modificaron las operaciones de dibujo.
+- Ejemplo con perfil temporal, fondo fijo, DPI v2, SendInput, captura por zonas y correlacion de eventos.
+- Uso: `cargo build --release`; `cargo run --release --example medir_parpadeo -- --vidrio si` (o `no`).
+- Opciones: `--teclas N --intervalo MS --umbral MS --exe RUTA --nombre X`; registro en el perfil temporal.
+- Verificado: `cargo build`, `cargo build --examples`, cuatro tests con `cargo test --example medir_parpadeo`; sin warnings.
+- `cargo test`: 37 pasan, 3 ignorados; solo falla `crypto::tests::dpapi_roundtrip` (sandbox conocido).
+- Pendiente: medicion en escritorio interactivo; `ai-init` no pudo crear CONTEXT/ARCHITECTURE por permisos de Git.
