@@ -166,6 +166,17 @@ unsafe extern "system" fn find_top(hwnd: HWND, data: LPARAM) -> BOOL {
     EnumChildWindows(hwnd, Some(find_note), data);
     1
 }
+/// Las teclas y clics simulados van a la ventana de adelante: si no es la
+/// instancia de prueba (el usuario hizo clic en otra cosa), se corta antes
+/// de escribir en otro programa.
+unsafe fn ensure_foreground(pid: u32) -> Result<(), String> {
+    let mut fg_pid = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &mut fg_pid);
+    if fg_pid != pid {
+        return Err("La ventana de adelante no es la nota de prueba: se cortó la medición para no escribir en otro programa".into());
+    }
+    Ok(())
+}
 unsafe fn key(code: u16, flags: u32) -> Result<(), String> {
     let input = INPUT {
         r#type: INPUT_KEYBOARD,
@@ -440,7 +451,15 @@ fn run() -> Result<(), String> {
         er.right += edit_origin.x;
         er.top += edit_origin.y;
         er.bottom += edit_origin.y;
+        // El punto del clic tiene que ser de la nota de prueba.
+        let mut target_pid = 0;
+        GetWindowThreadProcessId(WindowFromPoint(POINT { x: er.left + 20, y: er.top + 20 }), &mut target_pid);
+        if target_pid != pid {
+            return Err("Hay otra ventana tapando la nota de prueba: no se hace clic".into());
+        }
         click(er.left + 20, er.top + 20)?;
+        pause(Duration::from_millis(100));
+        ensure_foreground(pid)?;
         key(VK_CONTROL, 0)?;
         key(VK_END, 0)?;
         key(VK_END, KEYEVENTF_KEYUP)?;
@@ -502,6 +521,7 @@ fn run() -> Result<(), String> {
         let typing = (|| -> Result<(), String> {
             for i in 0..o.keys {
                 let c = b'a' as u16 + (i % 26) as u16;
+                ensure_foreground(pid)?;
                 key(c, KEYEVENTF_UNICODE)?;
                 key(c, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)?;
                 pause(Duration::from_millis(o.interval));
