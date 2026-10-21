@@ -18,11 +18,17 @@
   en vez de pisarse con una lista vacía. Modo vidrio: una falla momentánea al
   listar módulos ya no rehace todas las notas. (`fix/datos-y-vidrio`)
 
+- Claude — Candado en la barra de cada nota (sale del menú "⋯"): candado cerrado
+  para bloquear, abierto para desbloquear; bloqueada, el texto se atenúa un poco y
+  se puede seguir seleccionando y copiando. Ancho mínimo de nota: 180 px, para que
+  entren los cinco botones. (`feat/candado-en-barra`)
+
 ## Pendiente
 
 - Usuario — Probar en Windows: esquinas al asomar/siempre encima, desconectar un
   monitor, casillas en el medio del texto (clic, Ctrl+Z, bloqueada, vidrio),
-  asomar desde el selector y que vuelva a su lugar.
+  asomar desde el selector y que vuelva a su lugar, candado en la barra (bloquear,
+  desbloquear, seleccionar y copiar bloqueada, tema claro/oscuro y vidrio).
 - Bugs 1, 2 y 4 no se pudieron reproducir: los arreglos atacan las causas más
   probables encontradas leyendo el código. Si vuelven a pasar, anotar qué se
   estaba haciendo (asomar, cambiar de monitor, suspender, reiniciar Explorer).

@@ -555,8 +555,15 @@ fn list_signature(text: &[u16]) -> Vec<(usize, List)> {
         .collect()
 }
 
+/// (tinta, fondo). Bloqueada, la tinta un poco hacia el fondo: se nota
+/// que es solo para leer, sin dejar de leerse.
 fn colors(edit: HWND) -> (u32, u32) {
-    with_state(edit, |s| (s.ink, s.body)).unwrap_or((0, 0xffffff))
+    with_state(edit, |s| (if s.locked { dimmed(s.ink, s.body) } else { s.ink }, s.body)).unwrap_or((0, 0xffffff))
+}
+
+fn dimmed(ink: u32, body: u32) -> u32 {
+    let mix = |sh: u32| (((ink >> sh) & 0xff) * 75 + ((body >> sh) & 0xff) * 25) / 100;
+    mix(0) | (mix(8) << 8) | (mix(16) << 16)
 }
 
 /// Pone el contenido de una nota (texto y estilos) en el RichEdit, con
@@ -611,6 +618,17 @@ pub fn set_colors(edit: HWND, body: u32, ink: u32) {
     with_state(edit, |s| {
         s.body = body;
         s.ink = ink;
+    });
+    let (ink, body) = colors(edit); // atenuada si está bloqueada
+    // El formato se cambia aunque esté bloqueada (como en `load`).
+    let ro = locked(edit);
+    if ro {
+        unsafe { send(edit, EM_SETREADONLY, 0, 0) };
+    }
+    let _restore = Restore(move || {
+        if ro {
+            unsafe { send(edit, EM_SETREADONLY, 1, 0) };
+        }
     });
     unsafe { send(edit, EM_SETBKGNDCOLOR, 0, body as isize) };
     let _q = Quiet::new(edit);
@@ -1663,11 +1681,17 @@ pub fn selection_box(edit: HWND) -> Option<(RECT, [bool; STYLES])> {
 /// escriba; lo propio de acá (listas, casillas, formato, pegar) también
 /// se frena.
 pub fn set_locked(edit: HWND, on: bool) {
-    with_state(edit, |s| s.locked = on);
+    let Some((body, ink)) = with_state(edit, |s| {
+        s.locked = on;
+        (s.body, s.ink)
+    }) else {
+        return;
+    };
     if on {
         crate::seltool::hide_for(edit);
     }
     unsafe { send(edit, EM_SETREADONLY, on as usize, 0) };
+    set_colors(edit, body, ink); // la tinta, atenuada o no
 }
 
 fn locked(edit: HWND) -> bool {

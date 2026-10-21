@@ -153,10 +153,12 @@ Ya funciona:
   que no se lleva el foco; se va al escribir, hacer clic, desplazar o
   perder el foco, y el mouse encima cuenta como encima de la nota (para
   el enrollado automático).
-- **Bloquear una nota** ("⋯" → Bloquear): solo lectura. El RichEdit
-  pasa a `EM_SETREADONLY` (se puede seleccionar y copiar) y lo propio de
-  `editor.rs` (listas, casillas, formato, pegar) se frena; la barra
-  muestra solo un candado, que al tocarlo la desbloquea. Tampoco se
+- **Bloquear una nota** (el candado de la barra): solo lectura. El
+  RichEdit pasa a `EM_SETREADONLY` (se puede seleccionar y copiar), el
+  texto se atenúa un poco y lo propio de `editor.rs` (listas, casillas,
+  formato, pegar) se frena. El botón muestra lo que hace, no el estado:
+  candado cerrado para bloquear, abierto para desbloquear; bloqueada, la
+  barra muestra solo ese botón, en el mismo lugar. Tampoco se
   puede renombrar, enrollar, cambiar de tamaño, ocultar ni borrar
   mientras tanto; sí moverla. Como "oculta", es de cada compu.
 - **El menú de la nota** se abre solo con "⋯" (antes también con clic

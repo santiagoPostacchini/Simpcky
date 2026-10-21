@@ -61,8 +61,6 @@ const ID_TOGGLE_AUTOROLL: u32 = 2110;
 const ID_ALL_NOTES: u32 = 2111;
 /// Ocultar: la nota queda solo en "Todas las notas".
 const ID_HIDE: u32 = 2112;
-/// Bloquear: solo lectura, hasta tocar el candado.
-const ID_LOCK: u32 = 2113;
 const TIMER_PEEK_END: usize = 4;
 /// Acomodar otra vez las notas del escritorio: un momento después de que
 /// se active una, y un rato después de arrancar (ver `settle_widgets_with`).
@@ -142,14 +140,17 @@ fn create_window(data: &NoteData) -> HWND {
     let id = data.id;
     let hinstance = { app().lock().unwrap().hinstance };
     let class_name = wide(NOTE_CLASS);
-    let header = flyout::px(flyout::dpi_at(data.x, data.y) * scale_pct() / 100, HEADER_H);
+    let dpi = flyout::dpi_at(data.x, data.y) * scale_pct() / 100;
+    let header = flyout::px(dpi, HEADER_H);
     let h = if data.rolled { header } else { data.h };
+    // Notas de antes de que el mínimo subiera (ver `MIN_W`).
+    let w = data.w.max(flyout::px(dpi, MIN_W));
     // Donde se dibuja, no donde "vive": una nota que viene de otra compu
     // (o de un monitor que ya no está) puede tener coordenadas fuera de
     // esta pantalla. Se muestra ajustada, pero el dato queda intacto:
     // si se lo reescribiera, esta compu le "corregiría" la posición a
     // las demás en la próxima sincronización.
-    let (x, y) = clamp_to_work_area(data.x, data.y, data.w, header);
+    let (x, y) = clamp_to_work_area(data.x, data.y, w, header);
     // Siempre encima: ventana normal, con botón en la barra de tareas
     // (WS_EX_APPWINDOW) y por encima de todo (WS_EX_TOPMOST). Widget
     // de escritorio: oculta de la barra de tareas (WS_EX_TOOLWINDOW) —
@@ -176,7 +177,7 @@ fn create_window(data: &NoteData) -> HWND {
             style | WS_CLIPCHILDREN,
             x,
             y,
-            data.w,
+            w,
             h,
             null_mut(),
             null_mut(),
@@ -401,7 +402,7 @@ enum Hit {
     Chevron,
     /// "⋯": colores y el resto de las opciones.
     More,
-    /// El candado de una nota bloqueada: la desbloquea.
+    /// El candado: bloquea la nota (solo lectura) o la desbloquea.
     Lock,
     /// El resto de la barra: arrastrar mueve la nota, doble clic la
     /// renombra.
@@ -411,6 +412,9 @@ enum Hit {
 
 const BTN_W: i32 = 32;
 const BTN_H: i32 = 30;
+/// Ancho mínimo de una nota: que entren los cinco botones de la barra
+/// (más, candado, enrollar, siempre encima, nueva) con un poco de aire.
+const MIN_W: i32 = 180;
 
 struct HeaderLayout {
     /// Alto del encabezado, ya escalado.
@@ -427,9 +431,11 @@ struct HeaderLayout {
     /// en la nota; el resto del tiempo la barra es nada más el título
     /// (un widget de escritorio no necesita cuatro íconos a la vista).
     buttons: bool,
-    /// Nota bloqueada: en lugar de los botones, solo el candado, siempre
-    /// a la vista.
+    /// El candado: con los botones, o solo él y siempre a la vista si la
+    /// nota está bloqueada. Va en el mismo lugar en los dos casos, así se
+    /// puede bloquear y desbloquear sin mover el mouse.
     lock: Option<RECT>,
+    locked: bool,
 }
 
 impl HeaderLayout {
@@ -440,18 +446,31 @@ impl HeaderLayout {
         let top = (height - bh) / 2;
         let slot = |i: i32| RECT { left: width - edge - bw * (i + 1), top, right: width - edge - bw * i, bottom: top + bh };
         let more = slot(0);
-        let (chevron, pin, add) = if chevron { (Some(slot(1)), slot(2), slot(3)) } else { (None, slot(1), slot(2)) };
+        let lock_slot = slot(1);
+        let (chevron, pin, add) = if chevron { (Some(slot(2)), slot(3), slot(4)) } else { (None, slot(2), slot(3)) };
         let buttons = buttons && !locked;
-        let lock = locked.then(|| slot(0));
-        let right = match lock {
-            Some(r) => r.left - p(4),
-            None if buttons => add.left - p(4),
-            None => width - p(14),
+        let lock = (buttons || locked).then_some(lock_slot);
+        let right = if buttons {
+            add.left - p(4)
+        } else if locked {
+            lock_slot.left - p(4)
+        } else {
+            width - p(14)
         };
         let warn = warn.then(|| RECT { left: p(8), top, right: p(8) + bh, bottom: top + bh });
         let left = warn.map(|r| r.right + p(2)).unwrap_or(p(14));
         let title_rect = RECT { left, top: 0, right: right.max(left), bottom: height };
-        HeaderLayout { height, warn, add, pin, chevron, more, title_rect, buttons, lock }
+        HeaderLayout { height, warn, add, pin, chevron, more, title_rect, buttons, lock, locked }
+    }
+
+    /// Lo que hace el botón, no el estado: candado cerrado para bloquear,
+    /// abierto para desbloquear (Segoe Fluent Icons / MDL2: "Lock", "Unlock").
+    fn lock_glyph(&self) -> u16 {
+        if self.locked {
+            0xE785
+        } else {
+            0xE72E
+        }
     }
 
     fn hit(&self, x: i32, y: i32) -> Hit {
@@ -587,13 +606,14 @@ fn hot_tick(hwnd: HWND) {
     invalidate_header(hwnd);
 }
 
-const TIPS: [(usize, &str); 6] = [
+const TIPS: [(usize, &str); 7] = [
     (1, "Nota nueva (Ctrl+N)"),
     (2, "Siempre encima (Ctrl+Mayús+T)"),
     (3, "Enrollar o desenrollar (Ctrl+R)"),
     (4, "Color y más opciones"),
     (5, "No se pudo guardar en el disco: Simpcky reintenta solo (ver el ícono de la bandeja)"),
-    (6, "Bloqueada: solo para leer y copiar. Clic para desbloquearla"),
+    (6, "Bloquear: solo para leer y copiar"),
+    (7, "Desbloquear"),
 ];
 
 /// Las ayudas que aparecen al dejar el mouse sobre un botón.
@@ -646,7 +666,8 @@ fn update_tooltips(hwnd: HWND, layout: &HeaderLayout) {
         (3, if layout.buttons { layout.chevron.unwrap_or(none) } else { none }),
         (4, if layout.buttons { layout.more } else { none }),
         (5, layout.warn.unwrap_or(none)),
-        (6, layout.lock.unwrap_or(none)),
+        (6, if layout.locked { none } else { layout.lock.unwrap_or(none) }),
+        (7, if layout.locked { layout.lock.unwrap_or(none) } else { none }),
     ];
     for (id, rect) in rects {
         let mut ti: TTTOOLINFOW = unsafe { std::mem::zeroed() };
@@ -771,7 +792,7 @@ fn paint(hwnd: HWND, hdc: HDC) {
                 flyout::fill_round(g, &rect, px(hwnd, 5) as f32, blend(ink, header_color, 0x24));
                 GdipDeleteGraphics(g);
             }
-            flyout::draw_glyph(mem, flyout::icon_font(-px(hwnd, 15)), LOCK_GLYPH, &rect, ink);
+            flyout::draw_glyph(mem, flyout::icon_font(-px(hwnd, 15)), layout.lock_glyph(), &rect, ink);
         }
 
         if let Some(r) = layout.warn {
@@ -940,7 +961,6 @@ fn show_note_menu(hwnd: HWND, below: RECT) {
         Entry::Separator,
         Entry::toggle(ID_TOGGLE_TOP, 0xE718, "Siempre encima", "Ctrl+Mayús+T", layer == Layer::AlwaysOnTop),
         Entry::toggle(ID_TOGGLE_AUTOROLL, 0xE70E, "Enrollar al quitar el mouse", "", roll_mode == RollMode::Auto),
-        Entry::item(ID_LOCK, LOCK_GLYPH, "Bloquear (solo lectura)", ""),
         Entry::item(ID_RENAME, 0xE8AC, "Cambiar nombre", "F2"),
         Entry::item(ID_DUPLICATE_NOTE, 0xE8C8, "Duplicar", ""),
         Entry::item(ID_HIDE, 0xED1A, "Ocultar", "Ctrl+W"),
@@ -1275,17 +1295,14 @@ pub fn delete_by_id(id: u32, owner: HWND) {
 // Guardar en "Todas las notas" (ocultar) y volver a mostrar
 // -----------------------------------------------------------------
 
-/// El candado del encabezado (Segoe Fluent Icons / MDL2: "Lock").
-const LOCK_GLYPH: u16 = 0xE72E;
-
 pub fn is_locked(hwnd: HWND) -> bool {
     let id = note_id(hwnd);
     app().lock().unwrap().notes.get(&id).is_some_and(|nr| nr.data.locked)
 }
 
 /// Bloquea la nota (solo lectura: se puede leer, seleccionar y copiar,
-/// moverla y nada más; en la barra queda solo el candado) o la libera
-/// (tocando el candado).
+/// moverla y nada más; en la barra queda solo el candado, y el texto un
+/// poco atenuado) o la libera. Las dos cosas, con el candado de la barra.
 pub fn set_locked(hwnd: HWND, on: bool) {
     let id = note_id(hwnd);
     let edit = {
@@ -1818,7 +1835,7 @@ unsafe fn paint_glass_header(
         if hot == Some(Hit::Lock) {
             c.with_graphics(|g| flyout::fill_round_argb(g, &rect, px(hwnd, 5) as f32, crate::glass::argb(ink, 0x30)));
         }
-        c.text(rect, &String::from_utf16_lossy(&[LOCK_GLYPH]), flyout::icon_font(-px(hwnd, 15)), ink, center);
+        c.text(rect, &String::from_utf16_lossy(&[layout.lock_glyph()]), flyout::icon_font(-px(hwnd, 15)), ink, center);
     }
     if let Some(r) = layout.warn {
         c.text(r, &String::from_utf16_lossy(&[0xE7BA]), flyout::icon_font(-px(hwnd, 16)), ink, center);
@@ -2015,7 +2032,7 @@ fn on_move_end(hwnd: HWND, resized: bool) {
                 nr.data.x = rc.left;
                 nr.data.y = rc.top;
             }
-            nr.data.w = (rc.right - rc.left).max(px(hwnd, 160));
+            nr.data.w = (rc.right - rc.left).max(px(hwnd, MIN_W));
             if !nr.data.rolled {
                 nr.data.h = (rc.bottom - rc.top).max(header_h(hwnd) + px(hwnd, 80));
             }
@@ -2257,7 +2274,7 @@ fn on_sizing_move(hwnd: HWND) -> bool {
     let mut p = POINT { x: 0, y: 0 };
     unsafe { GetCursorPos(&mut p) };
     let (dx, dy) = (p.x - start.x, p.y - start.y);
-    let (min_w, min_h) = (px(hwnd, 160), header_h(hwnd) + px(hwnd, 80));
+    let (min_w, min_h) = (px(hwnd, MIN_W), header_h(hwnd) + px(hwnd, 80));
     let (mut left, mut top, mut right, mut bottom) = (r.left, r.top, r.right, r.bottom);
     if matches!(edge, HTLEFT | HTTOPLEFT | HTBOTTOMLEFT) {
         left = (r.left + dx).min(r.right - min_w);
@@ -2303,7 +2320,7 @@ fn end_sizing(hwnd: HWND) -> bool {
 /// encabezado completo y algo de cuerpo debajo.
 fn on_getminmaxinfo(hwnd: HWND, lparam: LPARAM) {
     let info = unsafe { &mut *(lparam as *mut MINMAXINFO) };
-    info.ptMinTrackSize.x = px(hwnd, 160);
+    info.ptMinTrackSize.x = px(hwnd, MIN_W);
     info.ptMinTrackSize.y = header_h(hwnd) + px(hwnd, 80);
 }
 
@@ -2323,7 +2340,7 @@ fn on_lbuttondown(hwnd: HWND, lparam: LPARAM) {
             show_note_menu(hwnd, r);
         }
         Hit::Pin => toggle_always_on_top(hwnd),
-        Hit::Lock => set_locked(hwnd, false),
+        Hit::Lock => set_locked(hwnd, !is_locked(hwnd)),
         Hit::Bar => on_bar_click(hwnd, x, y),
         Hit::None => {
             let id = note_id(hwnd);
@@ -2518,7 +2535,6 @@ fn on_command(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
             ID_RENAME => crate::rename::begin(hwnd),
             ID_ALL_NOTES => crate::allnotes::show(),
             ID_HIDE => hide_note(hwnd),
-            ID_LOCK => set_locked(hwnd, true),
             id if (ID_COLOR_BASE..ID_COLOR_BASE + crate::theme::PALETTE_LEN as u32).contains(&id) => {
                 set_color(hwnd, (id - ID_COLOR_BASE) as u8)
             }
