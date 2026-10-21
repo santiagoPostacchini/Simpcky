@@ -2001,15 +2001,20 @@ pub fn recreate_all() {
 /// representa el alto "desenrollado", y mientras está enrollada la
 /// ventana mide el alto del encabezado, que no es lo que hay que
 /// recordar.
-fn on_move_end(hwnd: HWND) {
+///
+/// `resized` (lo manda `end_sizing`): en una nota asomada no se guarda la
+/// posición, que es la temporal bajo el mouse (ver `open_note`).
+fn on_move_end(hwnd: HWND, resized: bool) {
     let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
     unsafe { GetWindowRect(hwnd, &mut rc) };
     let id = note_id(hwnd);
     {
         let mut a = app().lock().unwrap();
         if let Some(nr) = a.notes.get_mut(&id) {
-            nr.data.x = rc.left;
-            nr.data.y = rc.top;
+            if !(resized && nr.peeking) {
+                nr.data.x = rc.left;
+                nr.data.y = rc.top;
+            }
             nr.data.w = (rc.right - rc.left).max(px(hwnd, 160));
             if !nr.data.rolled {
                 nr.data.h = (rc.bottom - rc.top).max(header_h(hwnd) + px(hwnd, 80));
@@ -2288,7 +2293,7 @@ fn end_sizing(hwnd: HWND) -> bool {
             if GetCapture() == hwnd {
                 ReleaseCapture();
             }
-            SendMessageW(hwnd, WM_EXITSIZEMOVE, 0, 0);
+            SendMessageW(hwnd, WM_EXITSIZEMOVE, 1, 0);
         }
     }
     was
@@ -2707,7 +2712,7 @@ pub unsafe extern "system" fn note_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM,
             0
         }
         WM_EXITSIZEMOVE => {
-            on_move_end(hwnd);
+            on_move_end(hwnd, wparam == 1);
             0
         }
         WM_MOVE => {
