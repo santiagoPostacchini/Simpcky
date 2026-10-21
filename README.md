@@ -29,7 +29,7 @@ cargo build --release
 En debug (`cargo run`) el binario abre una consola detrás; en release no
 (`#![windows_subsystem = "windows"]`).
 
-## Estado actual (v0.4.3)
+## Estado actual (v0.4.4)
 
 Ya funciona:
 
@@ -53,7 +53,7 @@ Ya funciona:
   "⋯" → Siempre encima) se convierte en una ventana normal, con botón en
   la barra de tareas y por encima de todo.
 - **Encabezado**: el título, y los botones (nota nueva, siempre encima,
-  enrollar, "⋯") solo con el mouse encima o mientras se escribe, con
+  enrollar, bloquear, "⋯") solo con el mouse encima o mientras se escribe, con
   ayudas al posar el mouse. Arrastrar la barra mueve la nota; un clic
   suelto ya no la enrolla (para eso está el botón y `Ctrl+R`).
 - **Menú "⋯" propio** (`flyout.rs`, al estilo de Windows 11): los seis
