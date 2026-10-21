@@ -25,7 +25,9 @@ use crate::persist::{NoteData, RollMode};
 use crate::shell;
 use crate::win::wide;
 
-pub const CONTROLLER_CLASS: &str = "SimpckyController";
+pub fn controller_class() -> String {
+    crate::app::test_instance().map_or_else(|| "SimpckyController".to_owned(), |v| format!("SimpckyController.{v}"))
+}
 const WM_TRAYICON: u32 = WM_APP + 1;
 /// Otra instancia (lanzada desde el clic derecho del escritorio, con
 /// `--new`) pide una nota nueva en (`wparam`, `lparam`), en
@@ -81,6 +83,7 @@ static HOTKEY_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 
 /// Registra el atajo elegido en Configuración (o ninguno).
 pub fn apply_hotkey() {
+    if crate::app::is_test_instance() { return; }
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT};
     let (hwnd, choice) = {
         let a = app().lock().unwrap();
@@ -127,7 +130,7 @@ fn taskbar_created_msg() -> u32 {
 /// Registra la clase de la ventana controladora oculta.
 pub fn register_class(hinstance: HINSTANCE) {
     unsafe {
-        let class_name = wide(CONTROLLER_CLASS);
+        let class_name = wide(&controller_class());
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             style: 0,
@@ -149,7 +152,7 @@ pub fn register_class(hinstance: HINSTANCE) {
 /// Crea la ventana controladora (invisible) y el icono de la bandeja.
 /// Devuelve su HWND.
 pub fn init(hinstance: HINSTANCE) -> HWND {
-    let class_name = wide(CONTROLLER_CLASS);
+    let class_name = wide(&controller_class());
     let title = wide("Simpcky");
     let hwnd = unsafe {
         CreateWindowExW(
@@ -561,6 +564,10 @@ unsafe extern "system" fn controller_wndproc(hwnd: HWND, msg: u32, wparam: WPARA
                     DestroyWindow(hwnd);
                 }
             }
+            0
+        }
+        WM_CLOSE if crate::app::is_test_instance() => {
+            exit_app(hwnd);
             0
         }
         WM_APP_QUIT => {

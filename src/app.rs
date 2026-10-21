@@ -209,3 +209,11 @@ pub fn next_note_id() -> u32 {
     a.next_id += 1;
     id
 }
+
+/// Nombre aislado; se lee una sola vez.
+pub fn test_instance() -> Option<&'static str> {
+    static NAME: OnceLock<Option<String>> = OnceLock::new();
+    NAME.get_or_init(|| std::env::var("SIMPCKY_INSTANCIA").ok().filter(|s| !s.is_empty())).as_deref()
+}
+
+pub fn is_test_instance() -> bool { test_instance().is_some() }
