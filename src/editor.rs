@@ -817,14 +817,24 @@ fn after_list_change(edit: HWND) {
     with_state(edit, |s| s.lists = list_signature(&all));
 }
 
-/// Tilda o destilda la tarea del párrafo que empieza en `a`.
+/// Tilda una casilla; solo el prefijo cambia el formato del párrafo.
 fn toggle_todo(edit: HWND, a: usize) {
     let text = units(edit);
-    let (_, b) = paragraph_at(&text, a);
-    let (kind, plen) = richtext::list_of(&text[a..b]);
-    let List::Todo { done } = kind else { return };
+    let Some(&c) = text.get(a) else { return };
+    let done = match c {
+        c if c == richtext::BOX_OPEN as u16 => false,
+        c if c == richtext::BOX_DONE as u16 => true,
+        _ => return,
+    };
+    let (start, b) = paragraph_at(&text, a);
     let (s, e) = selection(edit);
     replace(edit, a, a + 1, &List::Todo { done: !done }.prefix()[..3], true);
+    if a != start {
+        select(edit, s, e);
+        changed(edit);
+        return;
+    }
+    let (_, plen) = richtext::list_of(&text[a..b]);
     if done && b > a + plen {
         // Destildar saca el tachado que había puesto la tarea.
         let _q = Quiet::new(edit);
@@ -914,8 +924,7 @@ fn on_delete_key(edit: HWND, back: bool) -> bool {
     true
 }
 
-/// Espacio después de `[]`, `-`… al comienzo de una línea: la vuelve una
-/// lista.
+/// Espacio tras un atajo: lista al comienzo, casilla dentro del texto.
 fn on_space(edit: HWND) -> bool {
     let text = units(edit);
     let (s, e) = selection(edit);
@@ -923,13 +932,21 @@ fn on_space(edit: HWND) -> bool {
         return false;
     }
     let (a, b) = paragraph_at(&text, s);
-    if richtext::list_of(&text[a..b]).0 != List::None {
-        return false;
+    let typed = &text[a..s];
+    let (start, kind) = if let Some((len, done)) = richtext::shortcut_checkbox(typed) {
+        (s - len, List::Todo { done })
+    } else {
+        if richtext::list_of(&text[a..b]).0 != List::None {
+            return false;
+        }
+        let Some(kind) = richtext::shortcut_list(typed) else { return false };
+        (a, kind)
+    };
+    replace(edit, start, s, kind.prefix(), true);
+    let caret = start + richtext::utf16_len(kind.prefix()) as usize;
+    if start == a {
+        after_list_change(edit);
     }
-    let Some(kind) = richtext::shortcut_list(&text[a..s]) else { return false };
-    replace(edit, a, s, kind.prefix(), true);
-    let caret = a + richtext::utf16_len(kind.prefix()) as usize;
-    after_list_change(edit);
     select(edit, caret, caret);
     changed(edit);
     true
@@ -959,22 +976,23 @@ fn on_paste(edit: HWND) {
     changed(edit);
 }
 
-/// La casilla de tarea en el punto (`x`, `y`) del RichEdit: el inicio de
-/// su párrafo.
+/// Posición UTF-16 de la casilla en el punto (`x`, `y`) del RichEdit.
 fn checkbox_at(edit: HWND, x: i32, y: i32) -> Option<usize> {
     let pt = POINT { x, y };
     let cp = unsafe { send(edit, EM_CHARFROMPOS, 0, &pt as *const POINT as isize) }.max(0) as usize;
     let text = units(edit);
     let (a, b) = paragraph_at(&text, cp.min(text.len()));
-    let (kind, _) = richtext::list_of(&text[a..b]);
-    if !matches!(kind, List::Todo { .. }) {
-        return None;
+    for (offset, _) in richtext::checkboxes(&text[a..b]) {
+        let at = a + offset;
+        let p0 = pos(edit, at);
+        let p1 = pos(edit, at + 1);
+        let right = if p1.y == p0.y && p1.x > p0.x { p1.x } else { p0.x + 16 };
+        let bottom = line_bottom(edit, at, p0.y);
+        if x >= p0.x - 4 && x < right + 2 && y >= p0.y && y < bottom {
+            return Some(at);
+        }
     }
-    let p0 = pos(edit, a);
-    let p1 = pos(edit, a + 1);
-    let right = if p1.y == p0.y && p1.x > p0.x { p1.x } else { p0.x + 16 };
-    let bottom = line_bottom(edit, a, p0.y);
-    (x >= p0.x - 4 && x < right + 2 && y >= p0.y && y < bottom).then_some(a)
+    None
 }
 
 // -----------------------------------------------------------------
@@ -1248,13 +1266,7 @@ unsafe fn paint_marks(edit: HWND) {
         return;
     }
     let clusters = richtext::emoji_clusters(&text);
-    let todos: Vec<(usize, usize, bool)> = richtext::paragraphs(&text)
-        .into_iter()
-        .filter_map(|(a, b)| match richtext::list_of(&text[a..b]) {
-            (List::Todo { done }, plen) => Some((a, plen, done)),
-            _ => None,
-        })
-        .collect();
+    let todos = richtext::checkboxes(&text);
     if clusters.is_empty() && todos.is_empty() {
         return;
     }
@@ -1270,7 +1282,9 @@ unsafe fn paint_marks(edit: HWND) {
         let mut g: *mut GpGraphics = null_mut();
         if GdipCreateFromHDC(hdc, &mut g) == Ok && !g.is_null() {
             GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
-            for (a, plen, done) in todos {
+            for (a, done) in todos {
+                let (start, b) = paragraph_at(&text, a);
+                let plen = if a == start { richtext::list_of(&text[a..b]).1 } else { 1 };
                 let p0 = pos(edit, a);
                 if p0.y >= clip.bottom || p0.y + em * 2 < clip.top {
                     continue;
@@ -1305,6 +1319,10 @@ unsafe fn paint_marks(edit: HWND) {
     let (s, e) = selection(edit);
     let selected_visible = s != e && GetFocus() == edit;
     for (a, b) in clusters {
+        // La casilla conserva su dibujo aun con selector de emoji.
+        if !richtext::checkboxes(&text[a..b]).is_empty() {
+            continue;
+        }
         let p0 = pos(edit, a);
         if p0.y >= clip.bottom || p0.y + em * 2 < clip.top {
             continue;
