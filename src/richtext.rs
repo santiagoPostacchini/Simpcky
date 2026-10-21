@@ -63,6 +63,34 @@ pub fn shortcut_list(typed: &[u16]) -> Option<List> {
     }
 }
 
+/// Atajo de casilla al final, separado del texto por espacio o tab.
+pub fn shortcut_checkbox(typed: &[u16]) -> Option<(usize, bool)> {
+    for shortcut in ["[]", "[ ]", "[x]", "[X]"] {
+        let len = shortcut.len();
+        if typed.len() < len {
+            continue;
+        }
+        let start = typed.len() - len;
+        if (start == 0 || matches!(typed[start - 1], 0x20 | 0x09))
+            && typed[start..].iter().copied().eq(shortcut.encode_utf16())
+        {
+            return Some((len, matches!(shortcut, "[x]" | "[X]")));
+        }
+    }
+    None
+}
+
+/// Todas las casillas, con su posición UTF-16 y estado.
+pub fn checkboxes(text: &[u16]) -> Vec<(usize, bool)> {
+    text.iter().enumerate().filter_map(|(i, &c)| {
+        if c == BOX_OPEN as u16 || c == BOX_DONE as u16 {
+            Some((i, c == BOX_DONE as u16))
+        } else {
+            None
+        }
+    }).collect()
+}
+
 /// Los párrafos de un texto de RichEdit (separados por `\r`), como
 /// (inicio, fin) en unidades UTF-16, sin el separador.
 pub fn paragraphs(text: &[u16]) -> Vec<(usize, usize)> {
@@ -296,6 +324,28 @@ mod tests {
 
     fn w(s: &str) -> Vec<u16> {
         s.encode_utf16().collect()
+    }
+
+    #[test]
+    fn recognizes_checkbox_shortcuts() {
+        for (text, len, done) in [
+            ("comprar []", 2, false), ("[x]", 3, true),
+            ("[X]", 3, true), ("[ ]", 3, false), ("[]", 2, false),
+            ("pan\t[X]", 3, true), ("😀 []", 2, false),
+            ("\u{2610} []", 2, false),
+        ] {
+            assert_eq!(shortcut_checkbox(&w(text)), Some((len, done)), "{text}");
+        }
+        for text in ["a[]", "😀[]", "a[x]", "[] ", "", "[xx]", "pan\n[]"] {
+            assert_eq!(shortcut_checkbox(&w(text)), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn finds_all_checkboxes_in_utf16() {
+        assert_eq!(checkboxes(&w("pan ☐ y ☑")), vec![(4, false), (8, true)]);
+        assert_eq!(checkboxes(&w("\u{2610} 😀☑\r☐")), vec![(0, false), (4, true), (6, false)]);
+        assert!(checkboxes(&w("😀 []")).is_empty());
     }
 
     #[test]
