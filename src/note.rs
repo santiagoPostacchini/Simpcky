@@ -754,6 +754,7 @@ fn paint(hwnd: HWND, hdc: HDC) {
             DeleteDC(mem);
             paint_glass_header(hwnd, hdc, &layout, width, hh, header_color, ink, ha, (pinned, rolled, hot), &title, renaming);
             if client.bottom > hh {
+                exclude_text(hwnd, hdc);
                 crate::glass::fill(hdc, RECT { left: 0, top: hh, right: width, bottom: client.bottom }, body_color, ba);
                 if layout.buttons {
                     paint_grip(hwnd, hdc, body_color, ink, Some(ba));
@@ -818,6 +819,7 @@ fn paint(hwnd: HWND, hdc: HDC) {
         // Debajo del encabezado: el margen alrededor del texto (el
         // RichEdit tapa el resto; WS_CLIPCHILDREN evita pisarlo).
         if client.bottom > hh {
+            exclude_text(hwnd, hdc);
             fill_body(hdc, RECT { left: 0, top: hh, right: width, bottom: client.bottom }, body_color);
             if layout.buttons {
                 paint_grip(hwnd, hdc, body_color, ink, None);
@@ -1785,8 +1787,29 @@ fn on_erase(hwnd: HWND, hdc: HDC) {
         FillRect(hdc, &RECT { bottom: hh.min(rc.bottom), ..rc }, b);
         DeleteObject(b);
         if rc.bottom > hh {
+            exclude_text(hwnd, hdc);
             fill_body(hdc, RECT { top: hh, ..rc }, body);
         }
+    }
+}
+
+/// Lo que pinte la nota de acá en más, fuera del texto: el RichEdit pinta su
+/// fondo entero (ver `editor::paint_buffered`). Como es transparente
+/// (`WS_EX_TRANSPARENT`, para que no pinte un fondo opaco), Windows repinta
+/// primero la nota debajo de cada línea que cambia; si la nota pintaba ahí
+/// su color liso, la línea se veía vacía hasta que llegaba el texto: era el
+/// parpadeo al escribir (medido con `examples/medir_parpadeo.rs`).
+fn exclude_text(hwnd: HWND, hdc: HDC) {
+    let id = note_id(hwnd);
+    let Some(edit) = app().lock().unwrap().notes.get(&id).map(|nr| nr.edit as HWND).filter(|e| !e.is_null()) else { return };
+    unsafe {
+        if IsWindowVisible(edit) == 0 {
+            return; // enrollada
+        }
+        let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        GetWindowRect(edit, &mut r);
+        MapWindowPoints(null_mut(), hwnd, &mut r as *mut RECT as *mut POINT, 2);
+        ExcludeClipRect(hdc, r.left, r.top, r.right, r.bottom);
     }
 }
 

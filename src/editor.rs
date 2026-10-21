@@ -1176,6 +1176,14 @@ unsafe fn paint_overlay(edit: HWND) {
     if IsWindowVisible(edit) == 0 {
         return; // nota enrollada
     }
+    // Con `paint_buffered`, casillas y emojis salen en el mismo WM_PAINT que
+    // el texto (el RichEdit no dibuja fuera de él: medido). Acá queda solo la
+    // barra, que puede cambiar sin repintado (rango del desplazamiento) y no
+    // toca el cursor: esconderlo y mostrarlo en cada tecla lo hacía titilar.
+    if !with_state(edit, |s| s.services.is_null()).unwrap_or(true) {
+        paint_bar(edit);
+        return;
+    }
     let hdc = GetDC(edit);
     HideCaret(edit);
     draw_marks(edit, hdc);

@@ -58,4 +58,15 @@
 - Opciones: `--teclas N --intervalo MS --umbral MS --exe RUTA --nombre X`; registro en el perfil temporal.
 - Verificado: `cargo build`, `cargo build --examples`, cuatro tests con `cargo test --example medir_parpadeo`; sin warnings.
 - `cargo test`: 37 pasan, 3 ignorados; solo falla `crypto::tests::dpapi_roundtrip` (sandbox conocido).
-- Pendiente: medicion en escritorio interactivo; `ai-init` no pudo crear CONTEXT/ARCHITECTURE por permisos de Git.
+- Claude: el chequeo de que la ventana de adelante sea la de prueba antes de cada clic/tecla.
+
+## Parpadeo al escribir (Claude, `refactor/dibujo`) — resuelto, medido
+- Base (vidrio): 0,70 parpadeos/tecla (fila escrita y barra). Causa, por el registro: el RichEdit es
+  `WS_EX_TRANSPARENT`, así que Windows repinta la nota debajo de cada línea que cambia; la nota pintaba
+  ahí su color liso y el texto llegaba ~2 ms después.
+- Arreglo: la nota no pinta debajo del texto (`note::exclude_text`), el RichEdit arma fondo + texto
+  (`TxDraw`) + casillas + emojis en un lienzo (`editor::paint_buffered`), y fuera del WM_PAINT solo se
+  redibuja la barra (esconder el cursor en cada tecla lo hacía titilar).
+- Resultado: 0 parpadeos en 3 corridas con vidrio y 2 lisas (40 teclas cada una, nota siempre encima).
+- No hizo falta la Fase 2 del plan (RichEdit sin ventana). Ver `ARCHITECTURE.md`.
+- Pendiente: probar a mano anclada al escritorio sin vidrio (la medición usa siempre encima).
