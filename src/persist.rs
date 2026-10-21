@@ -379,7 +379,14 @@ pub struct Settings {
     /// 2 Ctrl+Alt+N, 3 Ctrl+Alt+Espacio. (El 1 era Win+Mayús+N, que abre
     /// OneNote: al cargar pasa a ser Ctrl+Alt+N.)
     pub hotkey: u8,
+    /// Cuánto esperar con el mouse fuera de una nota en modo Auto antes de
+    /// enrollarla (ver `ROLL_DELAYS_MS`): para quien mueve el mouse sin
+    /// querer, que no se le cierre la nota a cada rato.
+    pub roll_delay: u8,
 }
+
+/// Las esperas que se pueden elegir para el enrollado automático.
+pub const ROLL_DELAYS_MS: [u32; 5] = [0, 500, 1000, 2000, 3000];
 
 fn settings_path() -> PathBuf {
     data_dir().join("settings.json")
@@ -401,6 +408,7 @@ pub fn load_settings() -> Option<Settings> {
             3 => 3,
             _ => 2,
         },
+        roll_delay: j.u8_or("rollDelay", 0).min(ROLL_DELAYS_MS.len() as u8 - 1),
     })
 }
 
@@ -409,7 +417,7 @@ pub fn save_settings(s: &Settings) -> bool {
         return false;
     }
     let json = format!(
-        "{{\"dark\":{},\"defaultRollMode\":{},\"desktopMenu\":{},\"autoUpdate\":{},\"translucency\":{},\"scale\":{},\"hotkey\":{}}}\n",
+        "{{\"dark\":{},\"defaultRollMode\":{},\"desktopMenu\":{},\"autoUpdate\":{},\"translucency\":{},\"scale\":{},\"hotkey\":{},\"rollDelay\":{}}}\n",
         s.dark,
         s.default_roll_mode.as_u8(),
         s.desktop_menu,
@@ -417,6 +425,7 @@ pub fn save_settings(s: &Settings) -> bool {
         s.translucency,
         s.scale,
         s.hotkey,
+        s.roll_delay,
     );
     write_atomic(&settings_path(), &json)
 }

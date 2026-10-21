@@ -110,6 +110,7 @@ fn main() {
         translucency: 2,
         scale: 0,
         hotkey: 2,
+        roll_delay: 0,
     });
     theme::init(settings.dark);
 

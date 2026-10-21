@@ -38,7 +38,8 @@ Ya funciona:
 - **Enrollado con el switch pedido**: toda nota nace en modo **Manual**
   (nunca se enrolla sola). Desde el menú "⋯" de cada nota se puede pasar
   a **Auto** (se enrolla al quitar el mouse, se despliega al pasar por
-  encima). El valor por defecto para notas nuevas se cambia en
+  encima), con una espera opcional antes de enrollarse (Configuración →
+  "Esperar antes de enrollar": si el mouse vuelve antes, no se enrolla). El valor por defecto para notas nuevas se cambia en
   Configuración y sincronización.
 - Cada nota es, por defecto, un **widget de escritorio**: anclada
   dentro de la ventana que contiene los íconos del escritorio, hija de

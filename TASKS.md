@@ -33,6 +33,10 @@
   y se copia a la pantalla de una vez. Si no hay `ITextServices`, se pinta como
   antes. Prueba: `cargo test -- --ignored richedit_se_dibuja`. (`fix/parpadeo-linea`)
 
+- Claude — Ajuste "Esperar antes de enrollar" (al instante, 0,5, 1, 2 o 3 s; `rollDelay` en
+  `settings.json`): el enrollado automático espera con el mouse afuera todo ese tiempo seguido;
+  si vuelve antes, la cuenta se reinicia. (`feat/demora-enrollar`)
+
 ## Pendiente
 
 - Usuario — Probar en Windows: esquinas al asomar/siempre encima, desconectar un

@@ -37,6 +37,7 @@ pub enum Choice {
     Hotkey,
     Transparency,
     Scale,
+    RollDelay,
 }
 
 impl Choice {
@@ -45,6 +46,7 @@ impl Choice {
             Choice::Hotkey => &["Ninguno", "Ctrl+Alt+N", "Ctrl+Alt+Espacio"],
             Choice::Transparency => &["Apagada", "Suave", "Media", "Fuerte"],
             Choice::Scale => &["100 %", "125 %", "150 %"],
+            Choice::RollDelay => &["Al instante", "0,5 s", "1 s", "2 s", "3 s"],
         }
     }
 
@@ -59,6 +61,7 @@ impl Choice {
             },
             Choice::Transparency => s.translucency,
             Choice::Scale => s.scale,
+            Choice::RollDelay => s.roll_delay,
         }
     }
 
@@ -67,6 +70,10 @@ impl Choice {
             Choice::Hotkey => crate::tray::set_hotkey([0, 2, 3][v.min(2) as usize]),
             Choice::Transparency => crate::tray::set_translucency(v),
             Choice::Scale => crate::note::set_scale(v),
+            Choice::RollDelay => {
+                app().lock().unwrap().settings.roll_delay = v.min(crate::persist::ROLL_DELAYS_MS.len() as u8 - 1);
+                crate::app::save_settings();
+            }
         }
     }
 }
@@ -145,6 +152,9 @@ fn rows(cw: i32) -> Vec<(Row, RECT)> {
         (Row::Card, CARD_H),
         (Row::Section("NOTAS"), SECTION_H),
         (Row::Switch(Hit::AutoRoll, "Enrollar las nuevas al quitar el mouse", roll_auto), ROW_H),
+        (Row::Label("Esperar antes de enrollar"), 28),
+        (Row::Segments(Choice::RollDelay), SEGMENTS_H),
+        (Row::Hint("Si el mouse vuelve a la nota antes de que pase, no se enrolla."), HINT_H),
         (Row::Label("Atajo para traer una nota al frente"), 28),
         (Row::Segments(Choice::Hotkey), SEGMENTS_H),
         (Row::Hint(hotkey_hint), HINT_H),

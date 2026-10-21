@@ -506,6 +506,9 @@ struct HeaderState {
     hover: bool,
     hot: Option<Hit>,
     tips: isize,
+    /// Modo Auto: desde cuándo el mouse está fuera de la nota desenrollada
+    /// (ver `handle_hover_tick`). Vuelve a `None` apenas el mouse vuelve.
+    away_since: Option<std::time::Instant>,
 }
 
 thread_local! {
@@ -882,6 +885,16 @@ fn handle_hover_tick(hwnd: HWND) {
     let under = unsafe { WindowFromPoint(pt) };
     let hovered = under == hwnd || unsafe { IsChild(hwnd, under) != 0 } || crate::seltool::is_over(under, hwnd);
     let id = note_id(hwnd);
+    // La espera elegida en Configuración: el mouse tiene que estar afuera
+    // todo ese tiempo seguido; si vuelve antes, la cuenta empieza de nuevo.
+    let away = header_state(hwnd, |s| {
+        if hovered {
+            s.away_since = None;
+        }
+        s.away_since.get_or_insert_with(std::time::Instant::now).elapsed()
+    });
+    let delay = { app().lock().unwrap().settings.roll_delay };
+    let waited = away.as_millis() >= crate::persist::ROLL_DELAYS_MS[delay as usize] as u128;
 
     let change = {
         let mut a = app().lock().unwrap();
@@ -890,7 +903,7 @@ fn handle_hover_tick(hwnd: HWND) {
                 nr.data.rolled = false;
                 Some((false, nr.data.w, nr.data.h, nr.edit as HWND))
             }
-            Some(nr) if nr.data.roll_mode == RollMode::Auto && !hovered && !nr.data.rolled => {
+            Some(nr) if nr.data.roll_mode == RollMode::Auto && !hovered && waited && !nr.data.rolled => {
                 nr.data.rolled = true;
                 Some((true, nr.data.w, nr.data.h, nr.edit as HWND))
             }
