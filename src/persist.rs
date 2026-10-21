@@ -229,8 +229,22 @@ pub fn is_first_run() -> bool {
 }
 
 pub fn load_notes() -> Vec<NoteData> {
-    let Ok(text) = fs::read_to_string(notes_path()) else { return Vec::new() };
-    parse_notes(&text, now_ms())
+    load_notes_from(&notes_path(), now_ms())
+}
+
+/// Si el archivo existe pero no se puede leer o no es una lista de notas,
+/// se guarda una copia aparte antes de seguir: si no, el próximo guardado
+/// lo pisaba con una lista vacía y se perdían todas las notas.
+fn load_notes_from(path: &std::path::Path, now: u64) -> Vec<NoteData> {
+    if let Ok(text) = fs::read_to_string(path) {
+        if json::parse(&text).is_some_and(|j| j.as_array().is_some()) {
+            return parse_notes(&text, now);
+        }
+    }
+    if path.exists() {
+        let _ = fs::copy(path, path.with_extension(format!("json.ilegible-{now}")));
+    }
+    Vec::new()
 }
 
 fn parse_notes(text: &str, now: u64) -> Vec<NoteData> {
@@ -484,6 +498,21 @@ pub fn tombs_from_json(j: Option<&Json>) -> Vec<Tomb> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unreadable_notes_file_is_backed_up() {
+        let dir = std::env::temp_dir().join(format!("simpcky-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notes.json");
+        fs::write(&path, "[{\"id\":1, cortado").unwrap();
+        assert!(load_notes_from(&path, 42).is_empty());
+        assert_eq!(fs::read_to_string(dir.join("notes.json.ilegible-42")).unwrap(), "[{\"id\":1, cortado");
+        // Sin archivo: nada que respaldar.
+        fs::remove_file(&path).unwrap();
+        assert!(load_notes_from(&path, 43).is_empty());
+        assert!(!dir.join("notes.json.ilegible-43").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn note_roundtrip_keeps_everything() {

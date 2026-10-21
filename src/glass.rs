@@ -39,7 +39,10 @@ pub fn mod_loaded() -> bool {
         let mut needed = 0u32;
         let size = (modules.len() * std::mem::size_of::<HMODULE>()) as u32;
         if EnumProcessModules(process, modules.as_mut_ptr(), size, &mut needed) == 0 {
-            return false;
+            // Puede fallar un instante (mientras se carga una DLL): no es que
+            // el mod se haya ido. Contestar "no" rehacía todas las notas dos
+            // veces seguidas (sin vidrio y otra vez con vidrio).
+            return active();
         }
         let n = (needed as usize / std::mem::size_of::<HMODULE>()).min(modules.len());
         modules[..n].iter().any(|&m| {
