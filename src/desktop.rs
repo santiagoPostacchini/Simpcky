@@ -132,6 +132,7 @@ pub fn anchor(hwnd: HWND) -> bool {
             0,
             SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW,
         );
+        repaint_all(hwnd);
     }
     true
 }
@@ -239,12 +240,24 @@ pub fn detach(hwnd: HWND) {
         GetWindowRect(hwnd, &mut rect); // coordenadas de pantalla, aun siendo WS_CHILD
 
         SetParent(hwnd, null_mut());
-        let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
-        SetWindowLongPtrW(hwnd, GWL_STYLE, (style & !WS_CHILD) as isize);
         // Suelta, no hace falta estar en capas (ver `anchor`), y sin eso
-        // recupera las esquinas redondeadas y la sombra de Windows 11.
+        // recupera las esquinas redondeadas y la sombra de Windows 11. Antes
+        // de sacar WS_CHILD: ese cambio vuelve a pedir las esquinas (ver
+        // `note::update_shape`), y DWM no redondea una ventana en capas.
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (ex & !WS_EX_LAYERED) as isize);
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+        SetWindowLongPtrW(hwnd, GWL_STYLE, (style & !WS_CHILD) as isize);
         SetWindowPos(hwnd, HWND_TOP, rect.left, rect.top, 0, 0, SWP_NOSIZE | SWP_FRAMECHANGED);
+        repaint_all(hwnd);
     }
+}
+
+/// Repintar la nota entera, texto incluido. Al poner o sacar WS_EX_LAYERED
+/// Windows cambia la superficie donde se dibuja la ventana y no la repinta
+/// solo (lo dice la documentación de `SetLayeredWindowAttributes`): sin
+/// esto, el texto podía quedar sin dibujarse hasta ocultar la nota.
+fn repaint_all(hwnd: HWND) {
+    use windows_sys::Win32::Graphics::Gdi::{RedrawWindow, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE};
+    unsafe { RedrawWindow(hwnd, std::ptr::null(), null_mut(), RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN) };
 }

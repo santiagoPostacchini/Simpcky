@@ -194,28 +194,8 @@ fn create_window(data: &NoteData) -> HWND {
         // nota queda sin ventana (como cuando Explorer se reinicia) y se
         // vuelve a intentar en el próximo `recreate_lost` o arranque.
     } else {
-        // WS_POPUP no entra en el redondeo automático de esquinas de
-        // Windows 11 (eso solo lo aplica a ventanas "normales" con
-        // caption), así que se pide a mano; si no, la nota se ve como
-        // un rectángulo a secas en vez de una tarjeta.
-        let pref: i32 = DWMWCP_ROUND;
-        // Sin el borde gris de 1 px que Windows 11 le pone alrededor a
-        // las ventanas redondeadas: la nota es su color (y en modo vidrio
-        // el desenfoque), sin marco.
-        let border: u32 = DWMWA_COLOR_NONE;
+        round_corners(hwnd);
         unsafe {
-            DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_WINDOW_CORNER_PREFERENCE as u32,
-                &pref as *const i32 as *const c_void,
-                std::mem::size_of::<i32>() as u32,
-            );
-            DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_BORDER_COLOR as u32,
-                &border as *const u32 as *const c_void,
-                std::mem::size_of::<u32>() as u32,
-            );
             // Modo vidrio: el `WS_BORDER` de `WS_POPUPWINDOW` hizo falta
             // para que el mod la reconociera al crearla, y ya aplicó su
             // desenfoque; de acá en más solo dibujaría un marco gris de
@@ -229,6 +209,23 @@ fn create_window(data: &NoteData) -> HWND {
         }
     }
     hwnd
+}
+
+/// WS_POPUP no entra en el redondeo automático de esquinas de Windows 11
+/// (eso solo lo aplica a ventanas "normales" con caption), así que se pide
+/// a mano; si no, la nota se ve como un rectángulo a secas. Y sin el borde
+/// gris de 1 px que Windows 11 le pone a las ventanas redondeadas.
+///
+/// Hace falta cada vez que la nota vuelve a ser de primer nivel: mientras
+/// es hija del escritorio, DWM se olvida de esto, y al asomarse (o pasar a
+/// "siempre encima") quedaba con esquinas rectas hasta reiniciar la app.
+fn round_corners(hwnd: HWND) {
+    let pref: i32 = DWMWCP_ROUND;
+    let border: u32 = DWMWA_COLOR_NONE;
+    unsafe {
+        DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE as u32, &pref as *const i32 as *const c_void, std::mem::size_of::<i32>() as u32);
+        DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR as u32, &border as *const u32 as *const c_void, std::mem::size_of::<u32>() as u32);
+    }
 }
 
 fn note_id(hwnd: HWND) -> u32 {
@@ -1702,14 +1699,19 @@ fn update_shape(hwnd: HWND) {
             if GetWindowRgnBox(hwnd, &mut box_) != 0 {
                 SetWindowRgn(hwnd, null_mut(), 1);
             }
+            round_corners(hwnd);
             return;
         }
         let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
         GetWindowRect(hwnd, &mut rc);
         let d = px(hwnd, 16);
-        // El sistema se queda con la región: no se borra acá.
+        // El sistema se queda con la región: no se borra acá. Si no se
+        // pudo crear, se deja la que había (SetWindowRgn con nulo la
+        // sacaría, y la nota quedaría con esquinas rectas).
         let rgn = CreateRoundRectRgn(0, 0, rc.right - rc.left + 1, rc.bottom - rc.top + 1, d, d);
-        SetWindowRgn(hwnd, rgn, 1);
+        if !rgn.is_null() {
+            SetWindowRgn(hwnd, rgn, 1);
+        }
     }
 }
 
@@ -2501,6 +2503,21 @@ fn on_command(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     }
 }
 
+/// Se desconectó un monitor (o cambió la resolución) y la nota quedó entera
+/// fuera de toda pantalla: se trae al monitor más cercano. Como al crearla,
+/// solo se mueve la ventana; el dato guardado queda intacto (ver
+/// `create_window`), así vuelve a su lugar si el monitor vuelve.
+fn rescue_offscreen(hwnd: HWND) {
+    unsafe {
+        let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        if GetWindowRect(hwnd, &mut rc) == 0 || !MonitorFromRect(&rc, MONITOR_DEFAULTTONULL).is_null() {
+            return;
+        }
+        let (x, y) = clamp_to_work_area(rc.left, rc.top, rc.right - rc.left, header_h(hwnd));
+        crate::desktop::move_to_screen(hwnd, x, y);
+    }
+}
+
 fn is_peeking(hwnd: HWND) -> bool {
     let id = note_id(hwnd);
     app().lock().unwrap().notes.get(&id).map(|nr| nr.peeking).unwrap_or(false)
@@ -2528,6 +2545,7 @@ fn on_timer(hwnd: HWND, wparam: WPARAM) {
             } else if !is_peeking(hwnd) && !crate::desktop::is_anchored(hwnd) {
                 crate::desktop::anchor(hwnd);
             }
+            rescue_offscreen(hwnd);
             // ¿Se prendió o se apagó el mod de Windhawk?
             crate::tray::check_glass_soon();
         }
@@ -2543,6 +2561,12 @@ fn on_timer(hwnd: HWND, wparam: WPARAM) {
             let ours = fg == hwnd || unsafe { GetWindow(fg, GW_OWNER) } == hwnd || unsafe { IsChild(hwnd, fg) } != 0 || flyout::is_open();
             if !ours {
                 anchor_widget(hwnd);
+            } else if fg != hwnd {
+                // Algo nuestro tiene el foco (un menú, el "¿Eliminar?"). Se
+                // vuelve a mirar: si de ahí el foco pasa a otra app, la nota
+                // no recibe ningún "perdiste el foco" (ya no lo tenía) y se
+                // quedaba suelta, fuera del escritorio, hasta reiniciar.
+                unsafe { SetTimer(hwnd, TIMER_PEEK_END, 500, None) };
             }
         }
         TIMER_AUTOSAVE => {
