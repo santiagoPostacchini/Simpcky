@@ -1227,28 +1227,17 @@ unsafe fn paint_bar(edit: HWND) {
         let r = RECT { left: cx - w / 2, top: b.thumb.top, right: cx - w / 2 + w, bottom: b.thumb.bottom };
         (r, w, if wide { 60u32 } else { 35 })
     });
-    if let Some(alpha) = glass(edit) {
-        // Vidrio: la franja y el pulgar sobre un lienzo con alfa.
-        if let Some(c) = crate::glass::Canvas::new(strip.right - strip.left, strip.bottom - strip.top) {
-            c.fill(RECT { left: 0, top: 0, right: strip.right - strip.left, bottom: strip.bottom - strip.top }, body, alpha);
-            if let Some((r, w, a)) = thumb {
-                let r = RECT { left: r.left - strip.left, right: r.right - strip.left, ..r };
-                c.with_graphics(|g| flyout::fill_round_argb(g, &r, w as f32 / 2.0, crate::glass::argb(ink, (a * 255 / 100) as u8)));
-            }
-            c.blit(hdc, strip.left, strip.top);
-        }
-    } else {
-        fill_bg(edit, hdc, strip);
+    // La franja y el pulgar en un lienzo aparte, copiados de una sola vez
+    // (pintar el fondo y después el pulgar directo en pantalla parpadeaba).
+    // Lisa, el mismo lienzo con opacidad entera.
+    let alpha = glass(edit).unwrap_or(255);
+    if let Some(c) = crate::glass::Canvas::new(strip.right - strip.left, strip.bottom - strip.top) {
+        c.fill(RECT { left: 0, top: 0, right: strip.right - strip.left, bottom: strip.bottom - strip.top }, body, alpha);
         if let Some((r, w, a)) = thumb {
-            let mix = |sh: u32| (((ink >> sh) & 0xff) * a + ((body >> sh) & 0xff) * (100 - a)) / 100;
-            let color = mix(0) | (mix(8) << 8) | (mix(16) << 16);
-            let mut g: *mut GpGraphics = null_mut();
-            if GdipCreateFromHDC(hdc, &mut g) == Ok && !g.is_null() {
-                GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
-                flyout::fill_round(g, &r, w as f32 / 2.0, color);
-                GdipDeleteGraphics(g);
-            }
+            let r = RECT { left: r.left - strip.left, right: r.right - strip.left, ..r };
+            c.with_graphics(|g| flyout::fill_round_argb(g, &r, w as f32 / 2.0, crate::glass::argb(ink, (a * 255 / 100) as u8)));
         }
+        c.blit(hdc, strip.left, strip.top);
     }
     ReleaseDC(edit, hdc);
 }
@@ -1296,41 +1285,27 @@ unsafe fn paint_marks(edit: HWND) {
     HideCaret(edit);
     IntersectClipRect(hdc, clip.left, clip.top, clip.right, clip.bottom);
 
-    if !todos.is_empty() {
-        let mut g: *mut GpGraphics = null_mut();
-        if GdipCreateFromHDC(hdc, &mut g) == Ok && !g.is_null() {
-            GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
-            for (a, done) in todos {
-                let (start, b) = paragraph_at(&text, a);
-                let plen = if a == start { richtext::list_of(&text[a..b]).1 } else { 1 };
-                let p0 = pos(edit, a);
-                if p0.y >= clip.bottom || p0.y + em * 2 < clip.top {
-                    continue;
-                }
-                let p1 = pos(edit, a + 1);
-                let right = if p1.y == p0.y && p1.x > p0.x { p1.x } else { p0.x + em };
-                let pe = pos(edit, a + plen);
-                let cover = if pe.y == p0.y && pe.x > right { pe.x } else { right };
-                let bottom = line_bottom(edit, a, p0.y);
-                let glyph = RECT { left: p0.x, top: p0.y, right, bottom };
-                match glass(edit) {
-                    Some(alpha) => {
-                        // Vidrio: la casilla sobre un lienzo con alfa.
-                        let area = RECT { right: cover, ..glyph };
-                        if let Some(c) = crate::glass::Canvas::new(area.right - area.left, area.bottom - area.top) {
-                            c.fill(RECT { left: 0, top: 0, right: area.right - area.left, bottom: area.bottom - area.top }, body, alpha);
-                            let local = RECT { left: 0, top: 0, right: right - area.left, bottom: area.bottom - area.top };
-                            c.with_graphics(|cg| draw_checkbox(cg, local, em, done, ink, body));
-                            c.blit(hdc, area.left, area.top);
-                        }
-                    }
-                    None => {
-                        fill_bg(edit, hdc, RECT { right: cover, ..glyph });
-                        draw_checkbox(g, glyph, em, done, ink, body);
-                    }
-                }
-            }
-            GdipDeleteGraphics(g);
+    for (a, done) in todos {
+        let (start, b) = paragraph_at(&text, a);
+        let plen = if a == start { richtext::list_of(&text[a..b]).1 } else { 1 };
+        let p0 = pos(edit, a);
+        if p0.y >= clip.bottom || p0.y + em * 2 < clip.top {
+            continue;
+        }
+        let p1 = pos(edit, a + 1);
+        let right = if p1.y == p0.y && p1.x > p0.x { p1.x } else { p0.x + em };
+        let pe = pos(edit, a + plen);
+        let cover = if pe.y == p0.y && pe.x > right { pe.x } else { right };
+        let bottom = line_bottom(edit, a, p0.y);
+        let glyph = RECT { left: p0.x, top: p0.y, right, bottom };
+        // En un lienzo aparte y copiada de una vez (con vidrio, con su
+        // alfa): pintar fondo y casilla directo en pantalla parpadeaba.
+        let area = RECT { right: cover, ..glyph };
+        if let Some(c) = crate::glass::Canvas::new(area.right - area.left, area.bottom - area.top) {
+            c.fill(RECT { left: 0, top: 0, right: area.right - area.left, bottom: area.bottom - area.top }, body, glass(edit).unwrap_or(255));
+            let local = RECT { left: 0, top: 0, right: right - area.left, bottom: area.bottom - area.top };
+            c.with_graphics(|cg| draw_checkbox(cg, local, em, done, ink, body));
+            c.blit(hdc, area.left, area.top);
         }
     }
 
@@ -1732,14 +1707,22 @@ unsafe fn fill_bg(edit: HWND, hdc: HDC, r: RECT) {
 
 /// Antes de que el RichEdit pinte (solo texto: es transparente), el fondo
 /// de lo que va a repintar.
+///
+/// Solo el rectángulo que cambió (al escribir, una línea; no la hoja
+/// entera: cuanto más tarda esto, más tiempo se ve la línea vacía antes
+/// del texto). Y nunca la franja de la barra de desplazamiento: la pinta
+/// entera `paint_bar` al terminar, y borrarla acá hacía parpadear el
+/// pulgar con cada tecla.
 unsafe fn paint_background(edit: HWND) {
     let rgn = CreateRectRgn(0, 0, 0, 0);
     let kind = GetUpdateRgn(edit, rgn, 0);
     if kind != NULLREGION && kind != RGN_ERROR {
         let hdc = GetDC(edit);
         SelectClipRgn(hdc, rgn);
+        let (strip, _) = bar(edit);
+        ExcludeClipRect(hdc, strip.left, strip.top, strip.right, strip.bottom);
         let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-        GetClientRect(edit, &mut rc);
+        GetRgnBox(rgn, &mut rc);
         fill_bg(edit, hdc, rc);
         ReleaseDC(edit, hdc);
     }

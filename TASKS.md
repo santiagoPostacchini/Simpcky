@@ -18,10 +18,16 @@
   en vez de pisarse con una lista vacía. Modo vidrio: una falla momentánea al
   listar módulos ya no rehace todas las notas. (`fix/datos-y-vidrio`)
 
-- Claude — Candado en la barra de cada nota (sale del menú "⋯"): candado cerrado
-  para bloquear, abierto para desbloquear; bloqueada, el texto se atenúa un poco y
+- Claude — Candado en la barra de cada nota (sale del menú "⋯"): muestra el estado
+  (abierto entre los botones; bloqueada, cerrado y pegado a la derecha); bloqueada,
+  el texto se atenúa un poco y
   se puede seguir seleccionando y copiando. Ancho mínimo de nota: 180 px, para que
   entren los cinco botones. (`feat/candado-en-barra`)
+
+- Claude — Parpadeo al escribir: el fondo ya no se repinta sobre la franja de la
+  barra de desplazamiento, se pinta solo el rectángulo que cambió, y la barra y
+  las casillas se dibujan en un lienzo aparte y se copian de una vez.
+  (`fix/candado-y-parpadeo`)
 
 ## Pendiente
 

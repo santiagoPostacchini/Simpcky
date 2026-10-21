@@ -431,9 +431,8 @@ struct HeaderLayout {
     /// en la nota; el resto del tiempo la barra es nada más el título
     /// (un widget de escritorio no necesita cuatro íconos a la vista).
     buttons: bool,
-    /// El candado: con los botones, o solo él y siempre a la vista si la
-    /// nota está bloqueada. Va en el mismo lugar en los dos casos, así se
-    /// puede bloquear y desbloquear sin mover el mouse.
+    /// El candado: con los botones (abierto), o solo él, cerrado, pegado a
+    /// la derecha y siempre a la vista si la nota está bloqueada.
     lock: Option<RECT>,
     locked: bool,
 }
@@ -449,11 +448,11 @@ impl HeaderLayout {
         let lock_slot = slot(1);
         let (chevron, pin, add) = if chevron { (Some(slot(2)), slot(3), slot(4)) } else { (None, slot(2), slot(3)) };
         let buttons = buttons && !locked;
-        let lock = (buttons || locked).then_some(lock_slot);
+        let lock = if locked { Some(more) } else { buttons.then_some(lock_slot) };
         let right = if buttons {
             add.left - p(4)
         } else if locked {
-            lock_slot.left - p(4)
+            more.left - p(4)
         } else {
             width - p(14)
         };
@@ -463,13 +462,13 @@ impl HeaderLayout {
         HeaderLayout { height, warn, add, pin, chevron, more, title_rect, buttons, lock, locked }
     }
 
-    /// Lo que hace el botón, no el estado: candado cerrado para bloquear,
-    /// abierto para desbloquear (Segoe Fluent Icons / MDL2: "Lock", "Unlock").
+    /// El estado: candado cerrado si está bloqueada, abierto si no (Segoe
+    /// Fluent Icons / MDL2: "Lock", "Unlock").
     fn lock_glyph(&self) -> u16 {
         if self.locked {
-            0xE785
-        } else {
             0xE72E
+        } else {
+            0xE785
         }
     }
 
@@ -613,7 +612,7 @@ const TIPS: [(usize, &str); 7] = [
     (4, "Color y más opciones"),
     (5, "No se pudo guardar en el disco: Simpcky reintenta solo (ver el ícono de la bandeja)"),
     (6, "Bloquear: solo para leer y copiar"),
-    (7, "Desbloquear"),
+    (7, "Bloqueada: solo para leer y copiar. Clic para desbloquearla"),
 ];
 
 /// Las ayudas que aparecen al dejar el mouse sobre un botón.
