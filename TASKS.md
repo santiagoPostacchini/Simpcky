@@ -37,6 +37,14 @@
   `settings.json`): el enrollado automático espera con el mouse afuera todo ese tiempo seguido;
   si vuelve antes, la cuenta se reinicia. (`feat/demora-enrollar`)
 
+- Claude — Sombra que quedaba en pantalla al asomar una nota (atajo, selector) y volver
+  al escritorio: un rectángulo oscuro translúcido, encima de todo, en el lugar donde se
+  vuelve a anclar. Era la imagen de ventana flotante que DWM no borra si la nota pasa a
+  ser hija del escritorio estando visible: `desktop::anchor` ahora la oculta antes.
+  Reproducido y verificado sin vidrio (nota enrollada, clic en el escritorio). También
+  se quitó `CS_DROPSHADOW` (su `SysShadow` tampoco seguía a la nota). Con vidrio no se
+  pudo probar: Windhawk no inyecta el mod en procesos lanzados desde la terminal.
+
 ## Pendiente
 
 - Usuario — Probar en Windows: esquinas al asomar/siempre encima, desconectar un

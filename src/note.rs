@@ -85,7 +85,11 @@ pub fn register_class(hinstance: HINSTANCE) {
             // CS_DBLCLKS: sin esto Windows nunca manda
             // WM_LBUTTONDBLCLK, solo dos WM_LBUTTONDOWN sueltos — y
             // el doble clic para editar el título no funcionaría.
-            style: CS_HREDRAW | CS_VREDRAW | CS_DROPSHADOW | CS_DBLCLKS,
+            // Sin CS_DROPSHADOW: esa sombra es una ventana aparte que no
+            // sigue a la nota cuando vuelve a ser hija del escritorio (al
+            // dejar de asomarse quedaba en pantalla). La sombra la pone
+            // DWM con las esquinas redondeadas (ver `round_corners`).
+            style: CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS,
             lpfnWndProc: Some(note_wndproc),
             cbClsExtra: 0,
             cbWndExtra: 0,

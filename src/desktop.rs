@@ -81,12 +81,20 @@ pub fn anchor(hwnd: HWND) -> bool {
         let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
         GetWindowRect(hwnd, &mut rect);
 
+        // Si era de primer nivel (asomada), se oculta antes: si no, DWM deja
+        // en pantalla su imagen de ventana flotante (un rectángulo oscuro con
+        // sombra, encima de todo). El SWP_SHOWWINDOW de abajo la vuelve a mostrar.
+        let hidden = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & WS_CHILD == 0 && ShowWindow(hwnd, SW_HIDE) != 0;
+
         // SetParent devuelve NULL si falla de verdad (GetParent, en
         // cambio, no es confiable para una ventana WS_POPUP sin
         // WS_CHILD: puede devolver NULL igual aunque el reparentado
         // haya funcionado — por eso se confía en este valor de
         // retorno y no en una relectura posterior).
         if SetParent(hwnd, worker).is_null() {
+            if hidden {
+                ShowWindow(hwnd, SW_SHOWNA); // queda suelta, pero a la vista
+            }
             return false;
         }
         // SetParent por sí solo no alcanza: sin el bit WS_CHILD, Windows
