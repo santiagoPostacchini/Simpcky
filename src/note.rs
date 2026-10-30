@@ -233,7 +233,7 @@ fn round_corners(hwnd: HWND) {
     }
 }
 
-fn note_id(hwnd: HWND) -> u32 {
+pub(crate) fn note_id(hwnd: HWND) -> u32 {
     unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as u32 }
 }
 
@@ -294,7 +294,7 @@ fn px(hwnd: HWND, v: i32) -> i32 {
 }
 
 /// Alto del encabezado de esta nota (y de la nota entera, enrollada).
-fn header_h(hwnd: HWND) -> i32 {
+pub(crate) fn header_h(hwnd: HWND) -> i32 {
     px(hwnd, HEADER_H)
 }
 
@@ -842,18 +842,35 @@ fn paint(hwnd: HWND, hdc: HDC) {
 // Enrollado (manual/auto)
 // -----------------------------------------------------------------
 
+/// Enrolla o abre la ventana, con transición: al abrirse, el texto ya
+/// está en su tamaño final y la nota lo va descubriendo; al enrollarse,
+/// se esconde recién cuando terminó de cerrarse.
 fn apply_rolled_state(hwnd: HWND, edit: HWND, w: i32, full_h: i32, rolled: bool) {
     let new_h = if rolled { header_h(hwnd) } else { full_h };
     if rolled {
         crate::seltool::hide_for(edit);
-    }
-    unsafe {
-        SetWindowPos(hwnd, null_mut(), 0, 0, w, new_h, SWP_NOMOVE | SWP_NOZORDER);
-        if !edit.is_null() {
-            ShowWindow(edit, if rolled { SW_HIDE } else { SW_SHOW });
+    } else if !edit.is_null() {
+        let rc = edit_rect(hwnd, w, full_h);
+        unsafe {
+            SetWindowPos(edit, null_mut(), rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, SWP_NOZORDER | SWP_NOCOPYBITS);
+            apply_text_padding(edit, w, rc.bottom - rc.top);
+            ShowWindow(edit, SW_SHOW);
         }
-        crate::trace::rect("apply_rolled_state", hwnd, None);
-        InvalidateRect(hwnd, null(), 1);
+    }
+    crate::trace::rect("apply_rolled_state", hwnd, None);
+    crate::anim::to_size(hwnd, w, new_h, crate::anim::ROLL_MS, if rolled { Some(hide_text) } else { None });
+    unsafe { InvalidateRect(hwnd, null(), 1) };
+}
+
+/// Terminó de enrollarse: el texto se esconde.
+fn hide_text(hwnd: HWND) {
+    let id = note_id(hwnd);
+    let edit = app().lock().unwrap().notes.get(&id).map(|nr| (nr.edit as HWND, nr.data.rolled));
+    if let Some((edit, true)) = edit {
+        unsafe {
+            ShowWindow(edit, SW_HIDE);
+            InvalidateRect(hwnd, null(), 1);
+        }
     }
 }
 
@@ -883,11 +900,43 @@ fn toggle_roll_manual(hwnd: HWND) {
     }
 }
 
+/// Cambia el tamaño abierto (`size`) y el enrollado de la nota, con
+/// transición y sin tocar su modo.
+pub(crate) fn reshape(hwnd: HWND, size: Option<(i32, i32)>, rolled: bool) {
+    let id = note_id(hwnd);
+    let change = {
+        let mut a = app().lock().unwrap();
+        match a.notes.get_mut(&id) {
+            Some(nr) if size.is_some_and(|s| s != (nr.data.w, nr.data.h)) || nr.data.rolled != rolled => {
+                if let Some((w, h)) = size {
+                    (nr.data.w, nr.data.h) = (w, h);
+                }
+                nr.data.rolled = rolled;
+                Some((nr.data.w, nr.data.h, nr.edit as HWND))
+            }
+            _ => None,
+        }
+    };
+    if let Some((w, h, edit)) = change {
+        apply_rolled_state(hwnd, edit, w, h, rolled);
+    }
+}
+
 fn handle_hover_tick(hwnd: HWND) {
+    // Mientras se arrastra una nota, ninguna se despliega al pasarle por encima.
+    if crate::snap::busy() {
+        return;
+    }
     let mut pt = POINT { x: 0, y: 0 };
     unsafe { GetCursorPos(&mut pt) };
     let under = unsafe { WindowFromPoint(pt) };
-    let hovered = under == hwnd || unsafe { IsChild(hwnd, under) != 0 } || crate::seltool::is_over(under, hwnd);
+    // Con Ctrl, las de una pila no se despliegan (así se agarran fácil para
+    // mover la pila) y la que estaba abierta se enrolla sin esperar.
+    let pile_ctrl = unsafe { GetKeyState(VK_CONTROL as i32) } < 0 && crate::snap::in_pile(hwnd);
+    let hovered = !pile_ctrl && (under == hwnd || unsafe { IsChild(hwnd, under) != 0 } || crate::seltool::is_over(under, hwnd));
+    if crate::snap::hush(hwnd, hovered) {
+        return;
+    }
     let id = note_id(hwnd);
     // La espera elegida en Configuración: el mouse tiene que estar afuera
     // todo ese tiempo seguido; si vuelve antes, la cuenta empieza de nuevo.
@@ -898,7 +947,7 @@ fn handle_hover_tick(hwnd: HWND) {
         s.away_since.get_or_insert_with(std::time::Instant::now).elapsed()
     });
     let delay = { app().lock().unwrap().settings.roll_delay };
-    let waited = away.as_millis() >= crate::persist::ROLL_DELAYS_MS[delay as usize] as u128;
+    let waited = pile_ctrl || away.as_millis() >= crate::persist::ROLL_DELAYS_MS[delay as usize] as u128;
 
     let change = {
         let mut a = app().lock().unwrap();
@@ -925,7 +974,7 @@ fn handle_hover_tick(hwnd: HWND) {
 /// La que se desenrolla pasa adelante de las otras notas (si no, otra
 /// enrollada encima le tapaba el texto), sin pasar adelante de ninguna
 /// aplicación ni robar el foco.
-fn raise_above_notes(hwnd: HWND) {
+pub(crate) fn raise_above_notes(hwnd: HWND) {
     unsafe {
         if GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & WS_CHILD != 0 {
             // Anclada: hija del escritorio, arriba de sus hermanas.
@@ -943,7 +992,7 @@ fn raise_above_notes(hwnd: HWND) {
     }
 }
 
-fn set_roll_mode(hwnd: HWND, mode: RollMode) {
+pub(crate) fn set_roll_mode(hwnd: HWND, mode: RollMode) {
     let id = note_id(hwnd);
     {
         let mut a = app().lock().unwrap();
@@ -1288,13 +1337,39 @@ pub fn confirm_delete(hwnd: HWND) {
 /// propia nota, o "Todas las notas" si se borra desde ahí).
 pub fn delete_note_confirm(hwnd: HWND, owner: HWND) {
     if ask_delete(owner) {
-        // Marcar ANTES de destruir: on_destroy solo borra los datos de
-        // una nota si el usuario lo pidió (ver `NoteRuntime::deleting`).
-        let id = note_id(hwnd);
-        if let Some(nr) = app().lock().unwrap().notes.get_mut(&id) {
-            nr.deleting = true;
+        delete_now(hwnd);
+    }
+}
+
+/// Borra la nota ya (el usuario lo pidió, o no había nada que perder).
+pub fn delete_now(hwnd: HWND) {
+    // Marcar ANTES de destruir: on_destroy solo borra los datos de
+    // una nota si el usuario lo pidió (ver `NoteRuntime::deleting`).
+    crate::snap::close_gap(hwnd);
+    let id = note_id(hwnd);
+    if let Some(nr) = app().lock().unwrap().notes.get_mut(&id) {
+        nr.deleting = true;
+    }
+    unsafe { DestroyWindow(hwnd) };
+}
+
+/// Al tacho (el panel de arriba al arrastrar): sin texto ni nombre se
+/// borra enseguida; si tiene algo, se pregunta como siempre.
+pub fn trash(hwnd: HWND) {
+    let id = note_id(hwnd);
+    let (edit, titled) = {
+        let a = app().lock().unwrap();
+        match a.notes.get(&id) {
+            Some(nr) => (nr.edit as HWND, !nr.data.title.trim().is_empty()),
+            None => return,
         }
-        unsafe { DestroyWindow(hwnd) };
+    };
+    // El texto vivo (el autoguardado puede ir atrás de lo escrito).
+    let empty = !titled && (edit.is_null() || read_text(edit).0.trim().is_empty());
+    if empty {
+        delete_now(hwnd);
+    } else {
+        delete_note_confirm(hwnd, hwnd);
     }
 }
 
@@ -1357,6 +1432,7 @@ pub fn set_locked(hwnd: HWND, on: bool) {
 pub fn hide_note(hwnd: HWND) {
     let id = note_id(hwnd);
     flyout::close();
+    crate::snap::close_gap(hwnd);
     crate::rename::finish(hwnd, true);
     commit_text_and_save(hwnd);
     {
@@ -1747,11 +1823,18 @@ fn on_size(hwnd: HWND, lparam: LPARAM) {
     }
     let w = (lparam & 0xffff) as i32;
     let total_h = ((lparam >> 16) & 0xffff) as i32;
+    // Al enrollarse o abrirse (solo cambia el alto) el texto se queda quieto
+    // y la nota lo va tapando o descubriendo; se acomoda una vez, al final.
+    // Si cambia el ancho, el texto lo acompaña en cada paso.
     let rc = edit_rect(hwnd, w, total_h);
-    unsafe {
-        SetWindowPos(edit, null_mut(), rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, SWP_NOZORDER | SWP_NOCOPYBITS);
+    let mut cur = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    unsafe { GetWindowRect(edit, &mut cur) };
+    if !(crate::anim::sizing(hwnd) && cur.right - cur.left == rc.right - rc.left) {
+        unsafe {
+            SetWindowPos(edit, null_mut(), rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, SWP_NOZORDER | SWP_NOCOPYBITS);
+        }
+        apply_text_padding(edit, w, rc.bottom - rc.top);
     }
-    apply_text_padding(edit, w, rc.bottom - rc.top);
     // Pintar ya, no "cuando se pueda": en un cambio de tamaño rápido
     // Windows muestra la parte nueva de la ventana antes de que la app la
     // pinte (en blanco, o la imagen vieja estirada), y el WM_PAINT recién
@@ -2071,7 +2154,7 @@ pub fn recreate_all() {
 ///
 /// `resized` (lo manda `end_sizing`): en una nota asomada no se guarda la
 /// posición, que es la temporal bajo el mouse (ver `open_note`).
-fn on_move_end(hwnd: HWND, resized: bool) {
+pub(crate) fn on_move_end(hwnd: HWND, resized: bool) {
     let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
     unsafe { GetWindowRect(hwnd, &mut rc) };
     let id = note_id(hwnd);
@@ -2167,17 +2250,25 @@ const RESIZE_CORNER: i32 = 18;
 /// Qué borde o esquina de la nota hay en (`x`, `y`) (pantalla), o 0. Lo
 /// usa también el texto (`editor.rs`), que llega hasta los costados y
 /// deja pasar ahí el mouse a la nota. Nada mientras está enrollada (el
-/// alto queda fijo al del encabezado).
+/// alto queda fijo al del encabezado). Bloqueada sí: el candado protege
+/// el texto, no el lugar que ocupa.
 pub fn resize_hit(hwnd: HWND, x: i32, y: i32) -> u32 {
     let id = note_id(hwnd);
-    if app().lock().unwrap().notes.get(&id).is_none_or(|nr| nr.data.rolled || nr.data.locked) {
-        return 0;
-    }
+    let Some(rolled) = app().lock().unwrap().notes.get(&id).map(|nr| nr.data.rolled) else { return 0 };
     let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
     unsafe { GetWindowRect(hwnd, &mut rc) };
     let (m, c) = (px(hwnd, RESIZE_MARGIN), px(hwnd, RESIZE_CORNER));
     let near = |v: i32, edge: i32, reach: i32, inward: bool| if inward { v >= edge && v < edge + reach } else { v < edge && v >= edge - reach };
     let (left, right) = (near(x, rc.left, m, true), near(x, rc.right, m, false));
+    if rolled {
+        // Enrollada (una nota de pila): con Ctrl se la alarga o achica por los
+        // costados, de a una celda (ver `snap::adjust`).
+        return match unsafe { GetKeyState(VK_CONTROL as i32) } < 0 {
+            true if left => HTLEFT,
+            true if right => HTRIGHT,
+            _ => 0,
+        };
+    }
     let (top, bottom) = (near(y, rc.top, m, true), near(y, rc.bottom, m, false));
     let (left_c, right_c) = (near(x, rc.left, c, true), near(x, rc.right, c, false));
     let (top_c, bottom_c) = (near(y, rc.top, c, true), near(y, rc.bottom, c, false));
@@ -2291,6 +2382,8 @@ thread_local! {
 /// Empieza a cambiar el tamaño desde `edge` (un `HTLEFT`…`HTBOTTOMRIGHT`).
 /// `false` si es una nota anclada: eso lo hace Windows.
 fn begin_sizing(hwnd: HWND, edge: u32) -> bool {
+    // Las ancladas las redimensiona Windows; las dos pasan por WM_WINDOWPOSCHANGING (Ctrl: por celdas).
+    crate::snap::begin_size(hwnd);
     unsafe {
         if GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & WS_CHILD != 0 {
             return false;
@@ -2553,9 +2646,14 @@ fn on_bar_click(hwnd: HWND, x: i32, y: i32) {
     unsafe {
         let mut pt = POINT { x, y };
         ClientToScreen(hwnd, &mut pt);
+        // Ctrl + Mayús + clic: la nota pasa a ser una pila.
+        let pile_click = GetKeyState(VK_CONTROL as i32) < 0 && GetKeyState(VK_SHIFT as i32) < 0;
         if DragDetect(hwnd, pt) != 0 {
             ReleaseCapture();
-            SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION as usize, 0);
+            // Arrastre propio (no el de Windows): la nota puede cambiar de forma mientras se la lleva.
+            crate::snap::begin_move(hwnd, x, y);
+        } else if pile_click {
+            crate::snap::make_pile(hwnd);
         } else {
             // Un clic en la barra de una nota en la que se estaba
             // escribiendo: el foco vuelve al texto.
@@ -2727,6 +2825,7 @@ pub unsafe extern "system" fn note_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM,
         // activen (si no, un clic lo pasaba adelante de las aplicaciones).
         WM_WINDOWPOSCHANGING => {
             let wp = &mut *(lparam as *mut WINDOWPOS);
+            crate::snap::adjust(hwnd, wp);
             if wp.flags & SWP_NOZORDER == 0 && !RESTACKING.get() && glass_widget(hwnd) {
                 match widget_slot(hwnd) {
                     Some(after) => wp.hwndInsertAfter = after,
@@ -2753,7 +2852,9 @@ pub unsafe extern "system" fn note_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM,
         WM_RBUTTONUP => 0,
         WM_NCLBUTTONDOWN if (HTLEFT..=HTBOTTOMRIGHT).contains(&(wparam as u32)) && begin_sizing(hwnd, wparam as u32) => 0,
         WM_MOUSEMOVE if on_sizing_move(hwnd) => 0,
+        WM_MOUSEMOVE if crate::snap::drag_move(hwnd) => 0,
         WM_LBUTTONUP if end_sizing(hwnd) => 0,
+        WM_LBUTTONUP if crate::snap::drop(hwnd) => 0,
         WM_CAPTURECHANGED => {
             end_sizing(hwnd);
             0
@@ -2781,6 +2882,7 @@ pub unsafe extern "system" fn note_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM,
             0
         }
         WM_EXITSIZEMOVE => {
+            crate::snap::finish_size(hwnd);
             on_move_end(hwnd, wparam == 1);
             0
         }

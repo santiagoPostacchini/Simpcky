@@ -15,6 +15,7 @@ use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND};
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::Graphics::GdiPlus::*;
+use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -49,9 +50,11 @@ struct State {
     /// Primera fila a la vista.
     top: usize,
     dpi: i32,
+    /// El mouse está sobre el "+" (nota nueva).
+    add_hot: bool,
 }
 
-static STATE: Mutex<State> = Mutex::new(State { hwnd: 0, query: String::new(), items: Vec::new(), sel: 0, top: 0, dpi: 96 });
+static STATE: Mutex<State> = Mutex::new(State { hwnd: 0, query: String::new(), items: Vec::new(), sel: 0, top: 0, dpi: 96, add_hot: false });
 
 pub fn register_class(hinstance: HINSTANCE) {
     unsafe {
@@ -217,6 +220,27 @@ fn row_at(y: i32) -> Option<usize> {
     (i < s.items.len() && i < s.top + MAX_ROWS).then_some(i)
 }
 
+/// El "+" de la búsqueda (coordenadas de cliente): una nota nueva.
+fn add_rect(w: i32) -> RECT {
+    let (s, pad) = (px(32), px(PAD) + px(6));
+    let top = (px(SEARCH_H) - s) / 2;
+    RECT { left: w - pad - s, top, right: w - pad, bottom: top + s }
+}
+
+fn in_rect(r: &RECT, x: i32, y: i32) -> bool {
+    x >= r.left && x < r.right && y >= r.top && y < r.bottom
+}
+
+/// "+": una nota nueva al frente, donde está el selector, y se cierra.
+fn new_note(hwnd: HWND) {
+    let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    unsafe { GetWindowRect(hwnd, &mut rc) };
+    let cx = (rc.left + rc.right) / 2;
+    let (w, _) = crate::note::default_size(cx, rc.top);
+    crate::tray::spawn_note_at(cx - w / 2, rc.top);
+    unsafe { DestroyWindow(hwnd) };
+}
+
 /// Trae la nota elegida y cierra el selector. Primero la nota (así pasa
 /// adelante mientras la app todavía es la de primer plano).
 fn pick(hwnd: HWND) {
@@ -260,7 +284,8 @@ fn on_paint(hwnd: HWND) {
         SetBkMode(mem, TRANSPARENT as i32);
 
         // La búsqueda: lupa, lo escrito (o qué hacer) y una rayita debajo.
-        let search = RECT { left: p(PAD) + p(8), top: 0, right: w - p(PAD) - p(8), bottom: p(SEARCH_H) };
+        let add = add_rect(w);
+        let search = RECT { left: p(PAD) + p(8), top: 0, right: add.left - p(8), bottom: p(SEARCH_H) };
         let icon = RECT { left: search.left, right: search.left + p(24), ..search };
         flyout::draw_glyph(mem, flyout::icon_font(-p(16)), 0xE721, &icon, c.muted);
         let mut text_rc = RECT { left: icon.right + p(8), ..search };
@@ -281,6 +306,11 @@ fn on_paint(hwnd: HWND) {
         let mut g: *mut GpGraphics = null_mut();
         GdipCreateFromHDC(mem, &mut g);
         GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
+        // "+": nota nueva, como el de la barra de cada nota.
+        if STATE.lock().unwrap().add_hot {
+            round_rect(g, &add, p(6) as f32, c.surface_hover);
+        }
+        flyout::draw_glyph(mem, flyout::icon_font(-p(14)), 0xE710, &add, c.text);
         let s = STATE.lock().unwrap();
         if s.items.is_empty() {
             let mut r = RECT { left: p(PAD) * 3, top: p(SEARCH_H) + p(PAD), right: w - p(PAD) * 3, bottom: h - p(PAD) };
@@ -384,6 +414,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             0
         }
         WM_MOUSEMOVE => {
+            let x = (lparam & 0xffff) as i16 as i32;
+            let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            GetClientRect(hwnd, &mut rc);
+            let hot = in_rect(&add_rect(rc.right), x, y);
+            if std::mem::replace(&mut STATE.lock().unwrap().add_hot, hot) != hot {
+                InvalidateRect(hwnd, null(), 0);
+                if hot {
+                    let mut tme = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
+                    TrackMouseEvent(&mut tme);
+                }
+            }
             if let Some(i) = row_at(y) {
                 let changed = {
                     let mut s = STATE.lock().unwrap();
@@ -395,7 +436,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             0
         }
+        WM_MOUSELEAVE => {
+            if std::mem::replace(&mut STATE.lock().unwrap().add_hot, false) {
+                InvalidateRect(hwnd, null(), 0);
+            }
+            0
+        }
         WM_LBUTTONUP => {
+            let x = (lparam & 0xffff) as i16 as i32;
+            let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            GetClientRect(hwnd, &mut rc);
+            if in_rect(&add_rect(rc.right), x, y) {
+                new_note(hwnd);
+                return 0;
+            }
             if let Some(i) = row_at(y) {
                 STATE.lock().unwrap().sel = i;
                 pick(hwnd);
@@ -420,6 +474,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 s.hwnd = 0;
                 s.items.clear();
                 s.query.clear();
+                s.add_hot = false;
             }
             0
         }

@@ -1,0 +1,70 @@
+esperar 1500
+foto inicio
+tomar Compras 150 20
+ir 2880 1 500
+foto panel
+ir 2795 56 250
+foto panel_2x1
+ir 2300 600 600
+foto vista_previa
+ir 2700 650 300
+foto vista_previa_2
+soltar
+foto ya_transicion
+esperar 300
+foto compras_en_celda
+ctrl 1
+tomar Ideas_Simpcky 150 20
+ir 3229 780 600
+foto ctrl_encima
+soltar
+ctrl 0
+esperar 500
+foto compras_achicada
+tomar Pass 100 20
+ir 2400 900 600
+foto pass_saliendo
+soltar
+esperar 500
+foto pass_afuera
+tomar Pass 100 20
+ir 3600 90 600
+foto pass_linea
+soltar
+esperar 500
+foto pass_en_pila
+ctrl 1
+tomar Copypastes 200 20
+ir 3000 500 700
+foto pila_moviendo
+soltar
+ctrl 0
+esperar 500
+foto pila_movida
+ctrl 1
+estirar Ideas_Simpcky 400 300 600
+ctrl 0
+esperar 400
+foto estirada
+tomar Compras 150 20
+ir 2200 300 300
+foto antes_de_esc
+esc
+esperar 500
+foto esc
+tomar Ideas_Simpcky 120 20
+ir 2880 1 400
+ir 3043 56 250
+foto panel_pila
+ir 2950 120 120
+ir 2300 300 500
+foto pila_nueva_arrastre
+soltar
+esperar 500
+foto pila_nueva
+tomar Compras 120 20
+ir 2350 330 500
+foto suma_a_pila_nueva
+soltar
+esperar 500
+foto dos_en_pila_nueva

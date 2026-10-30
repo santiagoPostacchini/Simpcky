@@ -3,6 +3,7 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
 mod allnotes;
+mod anim;
 mod app;
 mod glass;
 mod crypto;
@@ -24,6 +25,7 @@ mod seltool;
 mod settings;
 mod rename;
 mod shell;
+mod snap;
 mod sync;
 mod theme;
 mod tray;
@@ -164,6 +166,8 @@ fn main() {
     if !app::is_test_instance() && (first_settings || want_welcome) {
         welcome::show();
     }
+
+    snap::start_guion();
 
     if want_new {
         // La app no estaba abierta y la arrancó el clic derecho del

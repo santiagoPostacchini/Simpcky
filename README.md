@@ -137,7 +137,36 @@ Ya funciona:
   (o Ctrl+Alt+Espacio, o ninguno, en Configuración) muestra la lista de notas,
   la última usada primero; se escribe para filtrar, flechas y Enter (o
   clic), y la elegida se asoma adelante sin quedar "siempre encima".
-  También trae las ocultas.
+  También trae las ocultas. El "+" de la búsqueda crea una nota nueva.
+- **Celdas y pilas** (`snap.rs`): llevar una nota al borde de arriba del
+  monitor muestra un panel con cuatro tamaños (1×1, 2×1, 1×2, 2×2), una
+  pila y un tacho: soltarla sobre el tacho la borra (si tiene texto o
+  nombre, pregunta antes; bloqueada, no se puede). La cuadrícula se calcula para cada monitor: celdas de al menos
+  220 × 180 (al 100 %), estiradas hasta llenar el monitor. Con
+  aplicaciones a la vista, la cantidad de columnas y filas se elige para
+  que sus bordes caigan entre celdas (sigue el acomodo de Windows:
+  mitades, cuartos, tercios), y las celdas que tapan no se dibujan ni se
+  usan; una pila escondida detrás de una aplicación tampoco.
+  `Ctrl` mientras se arrastra muestra la cuadrícula sin ir arriba (la
+  nota encaja con su tamaño), y `Ctrl` + borde redimensiona de a una
+  celda. Si la nota cae sobre otra suelta, la otra se achica a la franja
+  libre más grande (nunca queda en L) o se corre al lugar libre más
+  cercano. Las **pilas** son notas enrolladas alineadas por un borde, una
+  cada alto de barra + 10 px: no se guardan, se reconocen por la
+  posición (también las armadas a mano). Cada nota más angosta que la
+  pila va pegada al borde izquierdo o al derecho, según de qué lado se la
+  suelte (la línea azul lo muestra). Soltar una nota sobre una pila la
+  suma enrollada y en modo Auto; sacarla la abre y la pasa a Manual;
+  al ocultar o borrar una, las de abajo suben. `Ctrl` + arrastrar mueve
+  la pila entera de celda en celda (si cae sobre otra pila, se juntan, y
+  mientras se la lleva se ve cómo van a quedar), y con `Ctrl` apretado sus
+  notas no se despliegan y se las puede alargar o achicar por los
+  costados, de a una celda y hasta dos (el lado alineado con la pila
+  queda fijo).
+  `Ctrl` + `Mayús` + clic en la barra convierte una nota en pila.
+  Las notas "siempre encima" no entran en celdas ni pilas. Todo se mueve
+  con transiciones suaves (`anim.rs`), también enrollar y desplegar; si
+  Windows tiene los efectos de animación apagados, pasa al instante.
 - **Ícono propio**, simple: un cuadrado amarillo redondeado con la
   franja del encabezado arriba (`assets/simpcky.ico`, 16 a 256 px).
   `build.rs` lo embebe en el `.exe` (arma el `.res` a mano, sin
@@ -160,8 +189,9 @@ Ya funciona:
   formato, pegar) se frena. El candado muestra el estado: abierto entre
   los botones de la barra; bloqueada, cerrado, solo y pegado a la
   derecha. Tampoco se
-  puede renombrar, enrollar, cambiar de tamaño, ocultar ni borrar
-  mientras tanto; sí moverla. Como "oculta", es de cada compu.
+  puede renombrar, enrollar, ocultar ni borrar mientras tanto; sí
+  moverla y cambiarle el tamaño (el candado protege el texto, no el
+  lugar que ocupa). Como "oculta", es de cada compu.
 - **El menú de la nota** se abre solo con "⋯" (antes también con clic
   derecho en la barra). El clic derecho en el texto sigue siendo el del
   formato.
