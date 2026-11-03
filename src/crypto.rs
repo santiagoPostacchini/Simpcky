@@ -112,9 +112,119 @@ fn dpapi(data: &[u8], encrypt: bool) -> Option<Vec<u8>> {
     }
 }
 
+/// PBKDF2-HMAC-SHA256 de CNG. El largo variable permite verificar RFC 7914.
+pub fn pbkdf2(password: &[u8], salt: &[u8], iterations: u64, len: usize) -> Result<Vec<u8>, String> {
+    if iterations == 0 || password.len() > u32::MAX as usize || salt.len() > u32::MAX as usize || len > u32::MAX as usize {
+        return Err("parámetros de PBKDF2 inválidos".into());
+    }
+    let mut out = vec![0; len];
+    cng(unsafe {
+        BCryptDeriveKeyPBKDF2(BCRYPT_HMAC_SHA256_ALG_HANDLE, password.as_ptr(), password.len() as u32,
+            salt.as_ptr(), salt.len() as u32, iterations, out.as_mut_ptr(), len as u32, 0)
+    })?;
+    Ok(out)
+}
+
+fn cng(status: i32) -> Result<(), String> {
+    if status >= 0 { Ok(()) } else { Err(format!("falló el cifrado de Windows ({status:#x})")) }
+}
+
+struct Algorithm(BCRYPT_ALG_HANDLE);
+impl Drop for Algorithm {
+    fn drop(&mut self) { unsafe { BCryptCloseAlgorithmProvider(self.0, 0); } }
+}
+struct Key(BCRYPT_KEY_HANDLE);
+impl Drop for Key {
+    fn drop(&mut self) { unsafe { BCryptDestroyKey(self.0); } }
+}
+
+/// AES-256-GCM; el tag de 16 bytes va al final del texto cifrado.
+pub fn gcm_encrypt(key: &[u8], nonce: &[u8], plain: &[u8]) -> Result<Vec<u8>, String> {
+    gcm(key, nonce, plain, true)
+}
+
+pub fn gcm_decrypt(key: &[u8], nonce: &[u8], sealed: &[u8]) -> Result<Vec<u8>, String> {
+    gcm(key, nonce, sealed, false)
+}
+
+fn gcm(secret: &[u8], nonce: &[u8], input: &[u8], encrypt: bool) -> Result<Vec<u8>, String> {
+    if secret.len() != 32 || nonce.len() != 12 || input.len() > u32::MAX as usize || (!encrypt && input.len() < 16) {
+        return Err("parámetros de AES-GCM inválidos".into());
+    }
+    unsafe {
+        let mut alg = Algorithm(null_mut());
+        cng(BCryptOpenAlgorithmProvider(&mut alg.0, BCRYPT_AES_ALGORITHM, null(), 0))?;
+        let mode = crate::win::wide("ChainingModeGCM");
+        cng(BCryptSetProperty(alg.0, BCRYPT_CHAINING_MODE, mode.as_ptr() as *const u8, (mode.len() * 2) as u32, 0))?;
+        let mut key = Key(null_mut());
+        // Windows administra el objeto de clave cuando pbKeyObject es NULL.
+        cng(BCryptGenerateSymmetricKey(alg.0, &mut key.0, null_mut(), 0, secret.as_ptr(), 32, 0))?;
+        let (data, mut tag) = if encrypt {
+            (input, [0u8; 16])
+        } else {
+            let (data, tag) = input.split_at(input.len() - 16);
+            (data, tag.try_into().unwrap())
+        };
+        let mut info: BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of_val(&info) as u32;
+        info.dwInfoVersion = BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO_VERSION;
+        info.pbNonce = nonce.as_ptr() as *mut u8;
+        info.cbNonce = 12;
+        info.pbTag = tag.as_mut_ptr();
+        info.cbTag = 16;
+        // Un puntero de salida válido incluso para texto vacío: NULL consulta el tamaño.
+        let mut out = vec![0; data.len().max(1)];
+        let mut written = 0;
+        let operation = if encrypt { BCryptEncrypt } else { BCryptDecrypt };
+        cng(operation(key.0, data.as_ptr(), data.len() as u32, &mut info as *mut _ as _,
+            null_mut(), 0, out.as_mut_ptr(), out.len() as u32, &mut written, 0))?;
+        out.truncate(written as usize);
+        if encrypt { out.extend_from_slice(&tag); }
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i+2], 16).unwrap()).collect()
+    }
+
+    #[test]
+    fn pbkdf2_rfc7914_section11() {
+        // https://www.rfc-editor.org/rfc/rfc7914.html#section-11
+        assert_eq!(hex(&pbkdf2(b"passwd", b"salt", 1, 64).unwrap()),
+            "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783");
+    }
+
+    #[test]
+    fn aes256_gcm_nist_empty_and_authentication() {
+        // NIST, AES_GCM.pdf, GCM-AES256, ejemplo 1 (sin AAD ni texto).
+        // https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Standards-and-Guidelines/documents/examples/AES_GCM.pdf
+        let key = unhex("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308");
+        let nonce = unhex("cafebabefacedbaddecaf888");
+        let mut sealed = gcm_encrypt(&key, &nonce, b"").unwrap();
+        assert_eq!(hex(&sealed), "fd2caa16a5832e76aa132c1453eeda7e");
+        assert_eq!(gcm_decrypt(&key, &nonce, &sealed).unwrap(), b"");
+        sealed[0] ^= 1;
+        assert!(gcm_decrypt(&key, &nonce, &sealed).is_err());
+        assert!(gcm_decrypt(&key, &nonce, &[0; 15]).is_err());
+    }
+
+    #[test]
+    fn aes256_gcm_nist_nonempty() {
+        // Mismo documento de NIST, GCM-AES256, ejemplo 2 (512 bits).
+        let key = unhex("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308");
+        let nonce = unhex("cafebabefacedbaddecaf888");
+        let plain = unhex("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255");
+        let mut sealed = gcm_encrypt(&key, &nonce, &plain).unwrap();
+        assert_eq!(hex(&sealed), "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662898015adb094dac5d93471bdec1a502270e3cc6c");
+        assert_eq!(gcm_decrypt(&key, &nonce, &sealed).unwrap(), plain);
+        sealed[0] ^= 1;
+        assert!(gcm_decrypt(&key, &nonce, &sealed).is_err());
+    }
 
     #[test]
     fn sha256_known_vector() {

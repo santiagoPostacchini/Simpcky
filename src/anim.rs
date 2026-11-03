@@ -5,7 +5,7 @@
 //! enrollarse mientras el arrastre la lleva. Si Windows tiene apagados los
 //! efectos de animación (Accesibilidad), todo pasa al instante.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::null_mut;
@@ -17,8 +17,6 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 pub const MOVE_MS: u32 = 200;
 pub const ROLL_MS: u32 = 170;
-/// Cada cuánto se da un paso (Windows redondea a ~16 ms).
-const FRAME_MS: u32 = 10;
 
 #[derive(Clone, Copy)]
 struct Part {
@@ -48,7 +46,6 @@ struct Tween {
 
 thread_local! {
     static TWEENS: RefCell<HashMap<isize, Tween>> = RefCell::new(HashMap::new());
-    static TIMER: Cell<usize> = const { Cell::new(0) };
 }
 
 fn enabled() -> bool {
@@ -114,7 +111,7 @@ fn set(hwnd: HWND, pos: Option<(i32, i32)>, size: Option<(i32, i32)>, ms: u32, d
         f(hwnd);
     }
     if moving.is_some() {
-        ensure_timer();
+        crate::frames::want(crate::frames::Who::Anim, true);
     }
 }
 
@@ -157,13 +154,8 @@ fn place(hwnd: HWND, pos: Option<(i32, i32)>, size: Option<(i32, i32)>) {
     unsafe { SetWindowPos(hwnd, null_mut(), p.x, p.y, w, h, flags) };
 }
 
-fn ensure_timer() {
-    if TIMER.get() == 0 {
-        TIMER.set(unsafe { SetTimer(null_mut(), 0, FRAME_MS, Some(tick)) });
-    }
-}
-
-unsafe extern "system" fn tick(_: HWND, _: u32, _: usize, _: u32) {
+/// Un cuadro (ver `frames.rs`): cada nota da un paso hacia donde va.
+pub fn frame() {
     let now = Instant::now();
     // (nota, posición, tamaño, qué hacer al terminar)
     type Step = (HWND, Option<(i32, i32)>, Option<(i32, i32)>, Option<fn(HWND)>);
@@ -172,7 +164,7 @@ unsafe extern "system" fn tick(_: HWND, _: u32, _: usize, _: u32) {
         let mut t = t.borrow_mut();
         t.retain(|&h, tw| {
             let hwnd = h as HWND;
-            if IsWindow(hwnd) == 0 {
+            if unsafe { IsWindow(hwnd) } == 0 {
                 return false;
             }
             let mut pos = None;
@@ -197,7 +189,7 @@ unsafe extern "system" fn tick(_: HWND, _: u32, _: usize, _: u32) {
             !over
         });
         if t.is_empty() {
-            KillTimer(null_mut(), TIMER.replace(0));
+            crate::frames::want(crate::frames::Who::Anim, false);
         }
     });
     for (hwnd, pos, size, done) in steps {

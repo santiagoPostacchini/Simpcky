@@ -34,13 +34,15 @@ const RICHEDIT_ID: usize = 100;
 const TIMER_HOVER: usize = 1;
 const TIMER_AUTOSAVE: usize = 2;
 const TIMER_DESKTOP_WATCH: usize = 3;
-const HOVER_POLL_MS: u32 = 150;
+/// Cada cuánto se mira si el mouse se fue de una nota en Auto (entrar la
+/// despliega al instante, ver `on_hover`).
+const HOVER_POLL_MS: u32 = 60;
 /// Cuánto se puede alejar el mouse de una nota abierta en Auto sin que se enrolle (a 100 %).
 const KEEP_OPEN_MARGIN: i32 = 40;
 /// Mientras el mouse está sobre la nota: cuándo se fue (y hay que
 /// esconder los botones del encabezado).
 const TIMER_HOT: usize = 6;
-const HOT_POLL_MS: u32 = 100;
+const HOT_POLL_MS: u32 = 50;
 const AUTOSAVE_DEBOUNCE_MS: u32 = 600;
 /// El anclaje al escritorio usa un truco no documentado de Explorer
 /// (ver `desktop.rs`) que un reinicio de `explorer.exe` puede
@@ -571,10 +573,15 @@ fn invalidate_header(hwnd: HWND) {
 /// El mouse pasó por la nota (el encabezado, o su texto: ver
 /// `editor.rs`): aparecen los botones, hasta que se vaya.
 pub fn on_hover(hwnd: HWND) {
+    crate::edges::track(hwnd);
     let newly = header_state(hwnd, |s| !std::mem::replace(&mut s.hover, true));
     if newly {
         unsafe { SetTimer(hwnd, TIMER_HOT, HOT_POLL_MS, None) };
         invalidate_header(hwnd);
+        // En Auto se despliega apenas entra el mouse, sin esperar al próximo vistazo.
+        if !is_manual(hwnd) {
+            handle_hover_tick(hwnd);
+        }
     }
 }
 
@@ -935,12 +942,12 @@ fn handle_hover_tick(hwnd: HWND) {
     if crate::snap::busy() {
         return;
     }
-    let mut pt = POINT { x: 0, y: 0 };
-    unsafe { GetCursorPos(&mut pt) };
+    // (El mouse y Ctrl, o los falsos del guion de prueba.)
+    let pt = crate::snap::pointer();
     let under = unsafe { WindowFromPoint(pt) };
     // Con Ctrl, las de una pila no se despliegan (así se agarran fácil para
     // mover la pila) y la que estaba abierta se enrolla sin esperar.
-    let pile_ctrl = unsafe { GetKeyState(VK_CONTROL as i32) } < 0 && crate::snap::in_pile(hwnd);
+    let pile_ctrl = crate::snap::ctrl_held() && crate::snap::in_pile(hwnd);
     let hovered = !pile_ctrl && (under == hwnd || unsafe { IsChild(hwnd, under) != 0 } || crate::seltool::is_over(under, hwnd));
     if crate::snap::hush(hwnd, hovered) {
         return;
@@ -2367,12 +2374,22 @@ const RESIZE_CORNER: i32 = 18;
 /// alto queda fijo al del encabezado). Bloqueada sí: el candado protege
 /// el texto, no el lugar que ocupa.
 pub fn resize_hit(hwnd: HWND, x: i32, y: i32) -> u32 {
+    edge_hit(hwnd, x, y, 0)
+}
+
+/// Como `resize_hit`, pero el borde también se agarra desde `out` píxeles
+/// afuera de la nota (lo usa el marco de `edges.rs`).
+pub fn edge_hit(hwnd: HWND, x: i32, y: i32, out: i32) -> u32 {
     let id = note_id(hwnd);
     let Some(rolled) = app().lock().unwrap().notes.get(&id).map(|nr| nr.data.rolled) else { return 0 };
     let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
     unsafe { GetWindowRect(hwnd, &mut rc) };
+    if x < rc.left - out || x >= rc.right + out || y < rc.top - out || y >= rc.bottom + out {
+        return 0;
+    }
     let (m, c) = (px(hwnd, RESIZE_MARGIN), px(hwnd, RESIZE_CORNER));
-    let near = |v: i32, edge: i32, reach: i32, inward: bool| if inward { v >= edge && v < edge + reach } else { v < edge && v >= edge - reach };
+    // `inward`: borde izquierdo o de arriba (la franja va hacia adentro desde ahí).
+    let near = |v: i32, edge: i32, reach: i32, inward: bool| if inward { v >= edge - out && v < edge + reach } else { v < edge + out && v >= edge - reach };
     let (left, right) = (near(x, rc.left, m, true), near(x, rc.right, m, false));
     if rolled {
         // Enrollada (una nota de pila): con Ctrl se la alarga o achica por los

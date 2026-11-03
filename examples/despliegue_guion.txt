@@ -1,0 +1,16 @@
+esperar 1500
+sobre Pass 60 15
+esperar 400
+foto 1_pasar_despliega
+ctrl 1
+esperar 300
+foto 2_con_ctrl_se_enrolla
+sobre Reunion 60 15
+esperar 400
+foto 3_ctrl_sobre_otra_no_despliega
+ctrl 0
+esperar 400
+foto 4_sin_ctrl_despliega
+sobre Fuera 60 15
+esperar 900
+foto 5_afuera_se_enrolla

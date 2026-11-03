@@ -33,7 +33,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::app::app;
 use crate::drive::{self, DriveError};
-use crate::json;
+use crate::{drive_crypto, json};
 use crate::oauth::{self, AuthError};
 use crate::persist::{self, NoteData, Tomb, SYNCED};
 use crate::win::wide;
@@ -100,7 +100,7 @@ pub fn merge(local: &[NoteData], local_tombs: &[Tomb], remote: &[NoteData], remo
     }
     for n in local {
         let merged = match notes.get(&n.uid) {
-            Some(r) => NoteData { id: n.id, hidden: n.hidden, locked: n.locked, ..merge_note(r, n) },
+            Some(r) => NoteData { id: n.id, hidden: n.hidden, locked: n.locked, pile: n.pile, ..merge_note(r, n) },
             None => n.clone(),
         };
         notes.insert(n.uid.clone(), merged);
@@ -132,13 +132,13 @@ pub fn merge(local: &[NoteData], local_tombs: &[Tomb], remote: &[NoteData], remo
 
 /// El documento de Drive (siempre en el mismo orden: dos documentos con
 /// el mismo contenido dan exactamente el mismo texto).
-fn doc_json(notes: &[NoteData], tombs: &[Tomb]) -> String {
+pub(crate) fn doc_json(notes: &[NoteData], tombs: &[Tomb]) -> String {
     let items: Vec<String> = notes.iter().map(|n| persist::note_json(n, false)).collect();
     let format = if notes.iter().any(|n| !n.fmt.is_empty()) { FORMAT } else { 1 };
     format!("{{\"format\":{format},\"notes\":[\n{}\n],\"deleted\":{}}}", items.join(",\n"), persist::tombs_json(tombs))
 }
 
-fn doc_parse(text: &str) -> Result<(Vec<NoteData>, Vec<Tomb>), String> {
+pub(crate) fn doc_parse(text: &str) -> Result<(Vec<NoteData>, Vec<Tomb>), String> {
     let j = json::parse(text).ok_or("el archivo de Drive está dañado")?;
     if j.u64_or("format", 1) > FORMAT as u64 {
         return Err("las notas de Drive son de una versión más nueva de Simpcky: actualizá la app en esta compu".into());
@@ -180,6 +180,7 @@ enum SyncError {
     /// Hay que volver a conectar la cuenta.
     Revoked,
     Other(String),
+    Paused(String),
 }
 
 type JobResult = Result<Outcome, SyncError>;
@@ -196,31 +197,37 @@ impl From<DriveError> for SyncError {
 fn run_job(job: Job) -> JobResult {
     let found = drive::find()?;
     if let Some(r) = &found {
-        if r.md5 == job.md5 && !job.dirty {
+        if r.md5 == job.md5 && !job.dirty && !drive_crypto::pending() {
             return Ok(Outcome::Unchanged { file_id: r.id.clone(), md5: r.md5.clone() });
         }
     }
-    let (remote_notes, remote_tombs, remote_doc) = match &found {
+    let (remote_notes, remote_tombs, remote_doc, rewrite) = match &found {
         Some(r) => {
             let text = drive::download(&r.id)?;
+            let (text, rewrite) = drive_crypto::open(&text).map_err(|e| match e {
+                drive_crypto::OpenError::Retry(m) => SyncError::Other(m),
+                drive_crypto::OpenError::Paused(m) => SyncError::Paused(m),
+            })?;
             let (n, t) = doc_parse(&text).map_err(SyncError::Other)?;
             let canonical = doc_json(&n, &t);
-            (n, t, Some(canonical))
+            (n, t, Some(canonical), rewrite)
         }
-        None => (Vec::new(), Vec::new(), None),
+        None => (Vec::new(), Vec::new(), None, false),
     };
 
     let (notes, tombs) = merge(&job.notes, &job.tombs, &remote_notes, &remote_tombs, persist::now_ms());
     let doc = doc_json(&notes, &tombs);
 
+    let upload = drive_crypto::seal(&doc).map_err(SyncError::Other)?;
     let remote = match (&found, remote_doc) {
-        (Some(r), Some(prev)) if prev == doc => r.clone(), // Drive ya tiene esto
-        (Some(r), _) => match drive::update(&r.id, &doc)? {
+        (Some(r), Some(prev)) if prev == doc && !rewrite && !drive_crypto::pending() => r.clone(), // Drive ya tiene esto
+        (Some(r), _) => match drive::update(&r.id, &upload)? {
             Some(updated) => updated,
-            None => drive::create(&doc)?, // lo borraron entre medio
+            None => drive::create(&upload)?, // lo borraron entre medio
         },
-        (None, _) => drive::create(&doc)?,
+        (None, _) => drive::create(&upload)?,
     };
+    drive_crypto::finish().map_err(SyncError::Other)?;
     Ok(Outcome::Merged { notes, tombs, file_id: remote.id, md5: remote.md5 })
 }
 
@@ -234,9 +241,10 @@ struct Runtime {
     again: bool,
     signing_in: Option<Arc<AtomicBool>>,
     last_error: String,
+    paused: bool,
 }
 
-static RT: Mutex<Runtime> = Mutex::new(Runtime { running: false, again: false, signing_in: None, last_error: String::new() });
+static RT: Mutex<Runtime> = Mutex::new(Runtime { running: false, again: false, signing_in: None, last_error: String::new(), paused: false });
 
 fn controller() -> HWND {
     app().lock().unwrap().controller_hwnd as HWND
@@ -259,6 +267,8 @@ pub fn status() -> (String, String) {
     let rt = RT.lock().unwrap();
     let state = if rt.running {
         "Sincronizando…".to_string()
+    } else if rt.paused {
+        rt.last_error.clone()
     } else if !rt.last_error.is_empty() {
         format!("No se pudo sincronizar: {}", rt.last_error)
     } else if last == 0 {
@@ -291,6 +301,8 @@ fn ago(ms: u64) -> String {
 /// después cada tanto.
 pub fn on_startup() {
     if is_connected() {
+        // Validar también el cifrado remoto al arrancar, aunque el MD5 sea el mismo.
+        app().lock().unwrap().sync_dirty = true;
         let hwnd = controller();
         unsafe {
             SetTimer(hwnd, TIMER_SYNC_POLL, POLL_MS, None);
@@ -321,12 +333,26 @@ pub fn sync_now() {
     start();
 }
 
+/// No cambia la contraseña mientras una subida usa la configuración anterior.
+pub fn set_drive_password(password: &str, accept_plaintext: bool) -> Result<(), String> {
+    {
+        let mut rt = RT.lock().unwrap();
+        if rt.running { return Err("Esperá a que termine la sincronización y probá de nuevo".into()); }
+        drive_crypto::set_password(password, accept_plaintext)?;
+        rt.paused = false;
+        rt.last_error.clear();
+    }
+    sync_now();
+    Ok(())
+}
+
 fn start() {
     if !is_connected() {
         return;
     }
     {
         let mut rt = RT.lock().unwrap();
+        if rt.paused { return; }
         if rt.running {
             rt.again = true;
             return;
@@ -380,12 +406,19 @@ pub fn on_done(lparam: isize) {
                 "Google ya no acepta la conexión guardada. Volvé a conectarla desde Configuración y sincronización (ícono de la bandeja).",
             );
         }
+        Err(SyncError::Paused(msg)) => {
+            let mut rt = RT.lock().unwrap();
+            rt.paused = true;
+            rt.last_error = msg;
+            app().lock().unwrap().sync_dirty = true;
+        }
         Err(SyncError::Other(msg)) => {
             RT.lock().unwrap().last_error = msg;
             // Lo que no se pudo subir se reintenta en la próxima vuelta.
             app().lock().unwrap().sync_dirty = true;
         }
     }
+    crate::allnotes::notify_changed();
     if again {
         request_soon(controller());
     }
@@ -538,7 +571,7 @@ pub fn on_sign_in_done(lparam: isize) {
                 a.sync.clone()
             };
             persist::save_sync_state(&state);
-            RT.lock().unwrap().last_error.clear();
+            { let mut rt = RT.lock().unwrap(); rt.last_error.clear(); rt.paused = false; }
             crate::tray::notify("Conectado con Google Drive", &format!("{email}. Tus notas se van a mantener iguales en todas tus compus."));
             unsafe { SetTimer(controller(), TIMER_SYNC_POLL, POLL_MS, None) };
             start();
@@ -577,7 +610,7 @@ fn disconnect_local() {
         a.sync.clone()
     };
     persist::save_sync_state(&state);
-    RT.lock().unwrap().last_error.clear();
+    { let mut rt = RT.lock().unwrap(); rt.last_error.clear(); rt.paused = false; }
     let hwnd = controller();
     unsafe {
         KillTimer(hwnd, TIMER_SYNC_POLL);

@@ -1,5 +1,25 @@
 # Tareas
 
+## En curso (rama `feat/fluidez-y-limites`, sale de master)
+
+- Claude — Cuadros al ritmo de la pantalla (`frames.rs`, `DwmFlush`) para transiciones, arrastre y
+  capas, en vez de `SetTimer`; Auto se despliega apenas entra el mouse. Medido con mouse real
+  (400 Hz): enrollar 27–30 pasos (antes 10), sin tirones; encaje 18 (antes 10).
+- Claude — Borde para cambiar el tamaño (`edges.rs`): marco que se agarra desde 6 px afuera, con
+  contorno y el borde elegido resaltado. Probado con mouse real en anclada y siempre encima
+  (`examples/borde_prueba.py`, `examples/mapa_cursores.py`).
+- Claude — "Siempre encima" entra en celdas y pilas. Pilas guardadas en la nota (`pile`,
+  `find_piles_keyed`, con test). El guion de prueba cubre el despliegue al pasar el mouse y Ctrl
+  sobre una pila (`examples/despliegue_guion.py`, verificado).
+- Codex + Claude — Cifrado de `notes.json` (DPAPI) y de Drive con contraseña; auditado
+  (security-auditor) y corregido (sobre con `format:1000` para versiones viejas, copia en claro
+  rechazada con contraseña puesta, mínimo 10 caracteres, primera activación con Drive en claro).
+  Verificado: `notes.json` queda cifrado y se vuelve a leer.
+- Falta probar a mano: el diálogo de contraseña y Drive real entre dos compus; el marco del borde
+  en modo vidrio y en notas privadas; una pila con notas "siempre encima"; la franja oscura de una
+  nota creada enrollada en un monitor con otra escala (acá los dos monitores están a 100 %).
+- OBS ("captura de juego"): queda para después, como pidió el usuario.
+
 ## Hecho (rama `fix/bugs-notas`, pendiente de merge a master)
 
 - Claude — Esquinas redondeadas: se vuelven a pedir a DWM cada vez que la nota
@@ -77,7 +97,11 @@
   el doble clic para renombrar, se deshace). Sin probar con mouse real (DragDetect).
 - Auto: una nota abierta no se enrolla con el mouse a menos de 40 px (no sobre otra nota),
   mientras se selecciona texto con el botón apretado, ni con su menú abierto.
-- Pendiente: cifrado de `notes.json` y de Drive (se decide después).
+- Hecho: cifrado de `notes.json` con DPAPI y de Drive con contraseña (CNG, PBKDF2-SHA256 + AES-256-GCM).
+  Migración desde JSON en claro, respaldo de blobs ilegibles, pausa sin fusionar ante contraseña
+  ausente o incorrecta, y cambio o eliminación desde Configuración. Build release sin warnings y
+  tests sin red pasando, incluidos DPAPI y vectores RFC/NIST. Pendiente: prueba visual del diálogo
+  y sincronización real entre dos compus (ver ARCHITECTURE.md).
 - Pendiente: el usuario vio una vez las notas "trabadas" (no se movían ni respondían) después de
   instalar esta versión; se destrabaron reiniciando la app. Sin reproducir: sin captura del mouse
   ni ventanas tapando después, y un registro de 3 minutos de uso (`GetGUIThreadInfo`, ventana bajo

@@ -85,6 +85,7 @@ pub enum Hit {
     CancelSignIn,
     SyncNow,
     Disconnect,
+    DriveEncryption,
     AutoRoll,
     Dark,
     Pick(Choice, u8),
@@ -151,6 +152,8 @@ fn rows(cw: i32) -> Vec<(Row, RECT)> {
     let mut list = vec![
         (Row::Section("SINCRONIZACIÓN"), SECTION_H),
         (Row::Card, CARD_H),
+        (Row::Action("Cifrar la copia de Drive".into(), Hit::DriveEncryption, "Configurar…".into()), ROW_H),
+        (Row::Hint(if crate::drive_crypto::enabled() { "Cifrado con contraseña activado en esta compu." } else { "La copia de Drive se guarda sin contraseña." }), HINT_H),
         (Row::Section("NOTAS"), SECTION_H),
         (Row::Switch(Hit::AutoRoll, "Enrollar las nuevas al quitar el mouse", roll_auto), ROW_H),
         (Row::Label("Esperar antes de enrollar"), 28),
@@ -263,6 +266,7 @@ pub fn click(hit: Hit) {
         Hit::CancelSignIn => crate::sync::cancel_sign_in(),
         Hit::SyncNow => crate::sync::sync_now(),
         Hit::Disconnect => crate::sync::disconnect(),
+        Hit::DriveEncryption => password_dialog(),
         Hit::AutoRoll => {
             let auto = crate::app::default_roll_mode() == RollMode::Auto;
             crate::tray::set_default_roll_mode(if auto { RollMode::Manual } else { RollMode::Auto });
@@ -442,4 +446,93 @@ pub unsafe fn paint(hdc: HDC, cw: i32, dy: i32, hover: Hit) {
         }
     }
     GdipDeleteGraphics(g);
+}
+
+
+/// Diálogo nativo: Tab, Enter y Esc los maneja Windows. Las contraseñas
+/// quedan vacías al abrirlo, incluso si ya hay una guardada.
+fn password_dialog() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
+    fn dword(v: &mut Vec<u16>, n: u32) { v.extend([n as u16, (n >> 16) as u16]); }
+    fn string(v: &mut Vec<u16>, s: &str) { v.extend(s.encode_utf16()); v.push(0); }
+    fn item(v: &mut Vec<u16>, class: u16, id: u16, style: u32, rect: [u16; 4], title: &str) {
+        if v.len() % 2 != 0 { v.push(0); }
+        dword(v, WS_CHILD | WS_VISIBLE | style);
+        dword(v, 0);
+        v.extend(rect);
+        v.extend([id, 0xffff, class]);
+        string(v, title);
+        v.push(0);
+    }
+    let mut v = Vec::new();
+    dword(&mut v, WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME as u32 | DS_SETFONT as u32 | DS_CENTER as u32);
+    dword(&mut v, 0);
+    v.extend([9, 0, 0, 310, 220, 0, 0]);
+    string(&mut v, "Copia de Drive — Simpcky");
+    v.push(9);
+    string(&mut v, "Segoe UI");
+    item(&mut v, 0x80, 100, WS_TABSTOP | BS_AUTOCHECKBOX as u32, [12, 10, 285, 16], "Cifrar la copia de Drive");
+    item(&mut v, 0x82, 101, 0, [12, 32, 285, 36], "Si la olvidás, la copia de Drive no se puede recuperar. Las notas de esta computadora no se pierden");
+    item(&mut v, 0x82, 102, 0, [12, 76, 285, 12], "Contraseña");
+    item(&mut v, 0x81, 103, WS_TABSTOP | WS_BORDER | ES_PASSWORD as u32 | ES_AUTOHSCROLL as u32, [12, 90, 285, 18], "");
+    item(&mut v, 0x82, 104, 0, [12, 114, 285, 12], "Repetí la contraseña");
+    item(&mut v, 0x81, 105, WS_TABSTOP | WS_BORDER | ES_PASSWORD as u32 | ES_AUTOHSCROLL as u32, [12, 128, 285, 18], "");
+    item(&mut v, 0x80, 106, WS_TABSTOP | BS_AUTOCHECKBOX as u32, [12, 154, 285, 28], "Aceptar la copia de Drive sin cifrar y volver a cifrarla");
+    item(&mut v, 0x80, IDOK as u16, WS_TABSTOP | BS_DEFPUSHBUTTON as u32, [147, 191, 72, 20], "Guardar");
+    item(&mut v, 0x80, IDCANCEL as u16, WS_TABSTOP, [225, 191, 72, 20], "Cancelar");
+    if v.len() % 2 != 0 { v.push(0); }
+    // DLGTEMPLATE y cada control requieren alineación de DWORD.
+    let aligned: Vec<u32> = v.chunks_exact(2).map(|w| w[0] as u32 | ((w[1] as u32) << 16)).collect();
+    let instance = app().lock().unwrap().hinstance as HINSTANCE;
+    unsafe {
+        DialogBoxIndirectParamW(instance, aligned.as_ptr() as _, crate::allnotes::window(), Some(password_proc), 0);
+    }
+}
+
+unsafe extern "system" fn password_proc(hwnd: HWND, msg: u32, wparam: WPARAM, _lparam: LPARAM) -> isize {
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
+    use windows_sys::Win32::UI::Controls::{BST_CHECKED, BST_UNCHECKED};
+    let clear = || {
+        SetDlgItemTextW(hwnd, 103, wide("").as_ptr());
+        SetDlgItemTextW(hwnd, 105, wide("").as_ptr());
+    };
+    match msg {
+        WM_INITDIALOG => {
+            SendDlgItemMessageW(hwnd, 100, BM_SETCHECK, BST_CHECKED as usize, 0);
+            return 1;
+        }
+        WM_COMMAND => match (wparam & 0xffff) as i32 {
+            IDOK => {
+                let read = |id| {
+                    let edit = GetDlgItem(hwnd, id);
+                    let mut buf = vec![0; GetWindowTextLengthW(edit).max(0) as usize + 1];
+                    GetWindowTextW(edit, buf.as_mut_ptr(), buf.len() as i32);
+                    let text = crate::win::from_wide(&buf);
+                    buf.fill(0);
+                    text
+                };
+                let enabled = SendDlgItemMessageW(hwnd, 100, BM_GETCHECK, 0, 0) != BST_UNCHECKED as isize;
+                let password = if enabled { read(103) } else { String::new() };
+                let result = if enabled && password.is_empty() {
+                    Err("Escribí una contraseña. Para quitar el cifrado, desmarcá la opción".into())
+                } else if enabled && password.chars().count() < 10 {
+                    Err("La contraseña debe tener al menos 10 caracteres".into())
+                } else if enabled && password != read(105) {
+                    Err("Las contraseñas no coinciden".into())
+                } else {
+                    crate::sync::set_drive_password(&password, enabled && SendDlgItemMessageW(hwnd, 106, BM_GETCHECK, 0, 0) != BST_UNCHECKED as isize)
+                };
+                match result {
+                    std::result::Result::Ok(()) => { clear(); EndDialog(hwnd, 1); crate::allnotes::notify_changed(); }
+                    Err(message) => { MessageBoxW(hwnd, wide(&message).as_ptr(), wide("Simpcky").as_ptr(), MB_OK | MB_ICONINFORMATION); }
+                }
+                return 1;
+            }
+            IDCANCEL => { clear(); EndDialog(hwnd, 0); return 1; }
+            _ => {}
+        },
+        WM_CLOSE => { clear(); EndDialog(hwnd, 0); return 1; }
+        _ => {}
+    }
+    0
 }

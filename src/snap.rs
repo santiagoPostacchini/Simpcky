@@ -34,7 +34,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::anim;
 use crate::app::{app, save_all};
-use crate::persist::{Layer, RollMode};
+use crate::persist::RollMode;
 use crate::win::wide;
 
 // =================================================================
@@ -461,6 +461,50 @@ pub fn find_piles(bars: &[(u32, RECT, bool)], bar: i32, step: i32, right_side: i
         .collect()
 }
 
+/// Como `find_piles`, pero las notas con el mismo número de pila guardado
+/// (`keys`, 0 = ninguno) forman su pila aunque estén desacomodadas (por
+/// ejemplo, después de un cambio de escala). Con dos o más a la vista; las
+/// demás se reconocen por la posición.
+pub fn find_piles_keyed(bars: &[(u32, RECT, bool)], keys: &[u32], bar: i32, step: i32, right_side: impl Fn(i32) -> bool) -> Vec<Pile> {
+    let gap = step - bar;
+    let tol = gap + 2;
+    let mut groups: Vec<(u32, Vec<(u32, RECT, bool)>)> = Vec::new();
+    for (b, &k) in bars.iter().zip(keys) {
+        if k == 0 {
+            continue;
+        }
+        match groups.iter_mut().find(|g| g.0 == k) {
+            Some(g) => g.1.push(*b),
+            None => groups.push((k, vec![*b])),
+        }
+    }
+    groups.retain(|g| g.1.len() >= 2);
+    let kept: Vec<u32> = groups.iter().flat_map(|g| g.1.iter().map(|b| b.0)).collect();
+    let mut piles: Vec<Pile> = groups
+        .into_iter()
+        .map(|(_, mut items)| {
+            items.sort_by_key(|b| b.1.top);
+            let (l, r) = (items.iter().map(|b| b.1.left).min().unwrap_or(0), items.iter().map(|b| b.1.right).max().unwrap_or(0));
+            let right = right_side((l + r) / 2);
+            let sides = items
+                .iter()
+                .map(|(_, b, _)| {
+                    let (dl, dr) = ((b.left - l).abs(), (b.right - r).abs());
+                    if dl <= tol && dr <= tol {
+                        right
+                    } else {
+                        dr < dl
+                    }
+                })
+                .collect();
+            Pile { right, edge: if right { r } else { l }, top: items[0].1.top, ids: items.iter().map(|b| b.0).collect(), sides }
+        })
+        .collect();
+    let rest: Vec<(u32, RECT, bool)> = bars.iter().filter(|b| !kept.contains(&b.0)).copied().collect();
+    piles.extend(find_piles(&rest, bar, step, right_side));
+    piles
+}
+
 // =================================================================
 // Las notas de un monitor
 // =================================================================
@@ -476,6 +520,8 @@ struct Info {
     h: i32,
     rolled: bool,
     bar: i32,
+    /// El número de pila guardado (0: ninguno).
+    pile: u32,
 }
 
 impl Info {
@@ -498,19 +544,20 @@ fn monitor_of(x: i32, y: i32) -> (HMONITOR, RECT) {
     }
 }
 
-/// Las notas del escritorio (no "siempre encima") cuya barra cae en `monitor`.
+/// Las notas cuya barra cae en `monitor`, también las "siempre encima":
+/// entran en celdas y pilas como las demás y siguen encima.
 fn notes_on(monitor: HMONITOR) -> Vec<Info> {
-    let list: Vec<(u32, HWND, i32, i32, i32, i32, bool)> = {
+    let list: Vec<(u32, HWND, i32, i32, i32, i32, bool, u32)> = {
         let a = app().lock().unwrap();
         a.notes
             .iter()
-            .filter(|(_, nr)| nr.hwnd != 0 && !nr.data.hidden && nr.data.layer != Layer::AlwaysOnTop)
-            .map(|(id, nr)| (*id, nr.hwnd as HWND, nr.data.x, nr.data.y, nr.data.w, nr.data.h, nr.data.rolled))
+            .filter(|(_, nr)| nr.hwnd != 0 && !nr.data.hidden)
+            .map(|(id, nr)| (*id, nr.hwnd as HWND, nr.data.x, nr.data.y, nr.data.w, nr.data.h, nr.data.rolled, nr.data.pile))
             .collect()
     };
     list.into_iter()
         .filter(|&(_, hwnd, ..)| unsafe { IsWindowVisible(hwnd) } != 0)
-        .map(|(id, hwnd, x, y, w, h, rolled)| Info { id, hwnd, x, y, w, h, rolled, bar: crate::note::header_h(hwnd) })
+        .map(|(id, hwnd, x, y, w, h, rolled, pile)| Info { id, hwnd, x, y, w, h, rolled, bar: crate::note::header_h(hwnd), pile })
         .filter(|n| monitor_of(n.x + n.w / 2, n.y + n.bar / 2).0 == monitor)
         .collect()
 }
@@ -562,8 +609,20 @@ fn px(dpi: i32, v: i32) -> i32 {
 
 fn piles_of(infos: &[Info], bar: i32, step: i32, work: RECT) -> Vec<Pile> {
     let bars: Vec<(u32, RECT, bool)> = infos.iter().map(|n| (n.id, n.bar_rect(), n.rolled)).collect();
+    let keys: Vec<u32> = infos.iter().map(|n| n.pile).collect();
     let mid = (work.left + work.right) / 2;
-    find_piles(&bars, bar, step, |x| x > mid)
+    find_piles_keyed(&bars, &keys, bar, step, |x| x > mid)
+}
+
+/// Ctrl y el mouse, o los falsos del guion de prueba. Los usa también el
+/// despliegue al pasar el mouse (`note::handle_hover_tick`), así el guion
+/// lo puede probar.
+pub(crate) fn ctrl_held() -> bool {
+    ctrl_down()
+}
+
+pub(crate) fn pointer() -> POINT {
+    cursor()
 }
 
 fn ctrl_down() -> bool {
@@ -603,6 +662,7 @@ pub fn close_gap(hwnd: HWND) {
     let Some((id, infos, piles, _, step)) = context_of(hwnd) else { return };
     let Some(mut pile) = piles.into_iter().find(|p| p.ids.len() >= 2 && p.ids.contains(&id)) else { return };
     pile.remove(id);
+    set_pile_key(id, 0);
     let by_id: HashMap<u32, Info> = infos.iter().map(|n| (n.id, *n)).collect();
     settle_pile(&pile, &by_id, step);
     save_all();
@@ -622,8 +682,28 @@ fn store(id: u32, x: i32, y: i32, wh: Option<(i32, i32)>) {
     }
 }
 
-/// Cada nota de la pila a su lugar (con transición) y guardada ahí.
+/// Guarda en qué pila está la nota (0: en ninguna).
+fn set_pile_key(id: u32, key: u32) {
+    if let Some(nr) = app().lock().unwrap().notes.get_mut(&id) {
+        nr.data.pile = key;
+    }
+}
+
+/// Cada nota de la pila a su lugar (con transición) y guardada ahí, con el
+/// mismo número de pila (el que ya tenía la mayoría, o uno nuevo).
 fn settle_pile(pile: &Pile, by_id: &HashMap<u32, Info>, step: i32) {
+    let key = if pile.ids.len() < 2 {
+        0
+    } else {
+        let mut count: HashMap<u32, usize> = HashMap::new();
+        for k in pile.ids.iter().filter_map(|id| by_id.get(id)).map(|n| n.pile).filter(|k| *k != 0) {
+            *count.entry(k).or_default() += 1;
+        }
+        count.into_iter().max_by_key(|&(k, c)| (c, k)).map(|(k, _)| k).unwrap_or_else(|| u32::from_le_bytes(crate::crypto::random_bytes(4).try_into().unwrap_or([1; 4])).max(1))
+    };
+    for id in &pile.ids {
+        set_pile_key(*id, key);
+    }
     let max_w = pile.ids.iter().filter_map(|k| by_id.get(k)).map(|n| n.w).max().unwrap_or(0);
     for (i, id) in pile.ids.iter().enumerate() {
         if let Some(n) = by_id.get(id) {
@@ -651,8 +731,6 @@ fn window_rect(hwnd: HWND) -> RECT {
 // =================================================================
 
 const SHAPES: [(i32, i32); 4] = [(1, 1), (2, 1), (1, 2), (2, 2)];
-/// Cada cuánto se mira Ctrl y Esc, y avanzan las capas (Windows redondea a ~16 ms).
-const FRAME_MS: u32 = 10;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Choice {
@@ -742,7 +820,6 @@ struct Drag {
 
 thread_local! {
     static DRAG: RefCell<Option<Drag>> = const { RefCell::new(None) };
-    static TIMER: Cell<usize> = const { Cell::new(0) };
     static QUIET: Cell<isize> = const { Cell::new(0) };
 }
 
@@ -763,6 +840,11 @@ pub fn hush(hwnd: HWND, hovered: bool) -> bool {
 /// ninguna se despliega al pasarle el mouse por encima.)
 pub fn busy() -> bool {
     DRAG.with(|d| d.try_borrow().map(|d| d.is_some()).unwrap_or(true))
+}
+
+/// ¿Se está llevando una nota (no cambiándole el tamaño)?
+pub fn moving() -> bool {
+    DRAG.with(|d| d.try_borrow().map(|d| d.as_ref().is_some_and(|d| d.kind != Kind::Size)).unwrap_or(true))
 }
 
 fn new_drag(hwnd: HWND, kind: Kind, grab: POINT) -> Drag {
@@ -863,9 +945,7 @@ fn build_drag(hwnd: HWND, kind: Kind, grab: POINT, pt: POINT, carry: &[Info]) ->
 
 fn start(d: Drag) {
     DRAG.with(|s| *s.borrow_mut() = Some(d));
-    if TIMER.get() == 0 {
-        TIMER.set(unsafe { SetTimer(null_mut(), 0, FRAME_MS, Some(tick)) });
-    }
+    crate::frames::want(crate::frames::Who::Snap, true);
 }
 
 /// Empieza a arrastrar la nota por la barra; (`x`, `y`): dónde se la
@@ -966,13 +1046,12 @@ pub fn finish_size(hwnd: HWND) {
     }
 }
 
-unsafe extern "system" fn tick(_: HWND, _: u32, _: usize, _: u32) {
-    let esc = GetAsyncKeyState(VK_ESCAPE as i32) < 0;
+/// Un cuadro (ver `frames.rs`): se miran Ctrl, Esc y el botón, y avanzan las capas.
+pub fn frame() {
+    let esc = unsafe { GetAsyncKeyState(VK_ESCAPE as i32) } < 0;
     let kind = DRAG.with(|s| s.try_borrow().ok().and_then(|s| s.as_ref().map(|d| d.kind)));
     match kind {
-        None => {
-            KillTimer(null_mut(), TIMER.replace(0));
-        }
+        None => crate::frames::want(crate::frames::Who::Snap, false),
         Some(k) if esc && k != Kind::Size => end(true),
         // El arrastre no depende de quedarse con el mouse: una nota anclada es
         // hija del escritorio (de Explorer) y puede perder la captura apenas la
@@ -1527,6 +1606,7 @@ fn end(cancel: bool) {
             }
             match d.target {
                 Target::Cell(t, open) => {
+                    set_pile_key(d.id, 0);
                     let r = d.grid.rect(t);
                     let (w, h) = (r.right - r.left, r.bottom - r.top);
                     let rolled = !(open || from_pile) && app().lock().unwrap().notes.get(&d.id).is_some_and(|nr| nr.data.rolled);
@@ -1535,6 +1615,10 @@ fn end(cancel: bool) {
                     anim::to_pos(hwnd, r.left, r.top, anim::MOVE_MS);
                 }
                 Target::Pile(p, i, side) => {
+                    // El número de la pila de la que vino no cuenta para la nueva.
+                    if let Some(n) = d.by_id.get_mut(&d.id) {
+                        n.pile = 0;
+                    }
                     let mut pile = d.piles[p].clone();
                     pile.insert(i, d.id, side);
                     // En una pila, la nota se despliega sola al pasarle el mouse.
@@ -1543,6 +1627,9 @@ fn end(cancel: bool) {
                     settle_pile(&pile, &d.by_id, d.step);
                 }
                 Target::NewPile => {
+                    if let Some(n) = d.by_id.get_mut(&d.id) {
+                        n.pile = 0;
+                    }
                     let pile = d.new_pile();
                     crate::note::set_roll_mode(hwnd, RollMode::Auto);
                     crate::note::reshape(hwnd, None, true);
@@ -1550,6 +1637,7 @@ fn end(cancel: bool) {
                 }
                 // (El tacho se atendió arriba.)
                 Target::None | Target::Trash => {
+                    set_pile_key(d.id, 0);
                     if from_pile {
                         crate::note::reshape(hwnd, None, false);
                     }
@@ -1581,6 +1669,8 @@ fn end(cancel: bool) {
 //   hacer_pila <título>               como Ctrl + Mayús + clic en su barra
 //   opcion <i>                        el cursor a una opción del panel (0-3 formas, 4 pila, 5 tacho)
 //   estirar <título> <dw> <dh> <ms>   cambia el tamaño desde abajo a la derecha
+//   sobre <título> <dx> <dy>          el cursor sobre esa nota, sin agarrarla (para
+//                                     ver el despliegue al pasar el mouse, y con Ctrl)
 
 thread_local! {
     static FAKE: Cell<Option<POINT>> = const { Cell::new(None) };
@@ -1664,6 +1754,12 @@ unsafe extern "system" fn guion_tick(_: HWND, _: u32, id: usize, _: u32) {
                 }
             }
             "ctrl" => FAKE_CTRL.set(Some(num(0) == 1)),
+            "sobre" => {
+                if let Some(h) = args.first().and_then(|t| note_by_title(t)) {
+                    let r = window_rect(h);
+                    FAKE.set(Some(POINT { x: r.left + num(1), y: r.top + num(2) }));
+                }
+            }
             "esperar" => {
                 if elapsed < num(0) {
                     step();
@@ -1772,9 +1868,12 @@ fn rq(v: &[i32; 4]) -> RECT {
     RECT { left: v[0], top: v[1], right: v[2], bottom: v[3] }
 }
 
-/// Acerca `v` a `to` un poco por cuadro (así todo llega suave).
-fn ease(v: &mut f32, to: f32, k: f32) {
-    *v += (to - *v) * k;
+/// Acerca `v` a `to` un poco por cuadro (así todo llega suave). `k` es lo
+/// que avanza en un cuadro de 16 ms; `s`, cuántos de esos duró este (los
+/// cuadros van al ritmo de la pantalla: a 144 Hz son más cortos, y el
+/// fundido tarda lo mismo).
+fn ease(v: &mut f32, to: f32, k: f32, s: f32) {
+    *v += (to - *v) * (1.0 - (1.0 - k).powf(s));
     if (to - *v).abs() < 0.01 {
         *v = to;
     }
@@ -1842,6 +1941,8 @@ struct Fx {
     panel_hot: Option<Option<usize>>,
     panel_a: f32,
     hint_a: f32,
+    /// Cuándo fue el cuadro anterior (los fundidos dependen del tiempo, no de cuántos cuadros hay).
+    last: Option<std::time::Instant>,
 }
 
 impl Fx {
@@ -1867,6 +1968,7 @@ impl Fx {
             panel_hot: None,
             panel_a: 0.0,
             hint_a: 0.0,
+            last: None,
         };
         for l in [&mut fx.grid, &mut fx.preview, &mut fx.line, &mut fx.hint, &mut fx.panel] {
             l.create();
@@ -1885,6 +1987,8 @@ impl Fx {
         let c = colors();
         let dpi = self.dpi;
         let f = |v: i32| (v * dpi / 96) as f32;
+        let now = std::time::Instant::now();
+        let s = self.last.replace(now).map_or(1.0, |t| (now - t).as_secs_f32() * 1000.0 / 16.0).min(4.0);
 
         // Cuadrícula y zonas de las pilas: aparecen con un fundido.
         if let Some(g) = &self.want.grid {
@@ -1910,7 +2014,7 @@ impl Fx {
                 self.grid_scene = Some(g.clone());
             }
         }
-        ease(&mut self.grid_a, if self.want.grid.is_some() { 1.0 } else { 0.0 }, 0.35);
+        ease(&mut self.grid_a, if self.want.grid.is_some() { 1.0 } else { 0.0 }, 0.35, s);
         self.grid.present(self.work.left, self.work.top, self.grid_a);
 
         // Vista previa: se desliza de celda en celda.
@@ -1919,13 +2023,13 @@ impl Fx {
             match &mut self.prev {
                 Some(cur) if self.prev_a > 0.0 => {
                     for i in 0..4 {
-                        ease(&mut cur[i], to[i], 0.4);
+                        ease(&mut cur[i], to[i], 0.4, s);
                     }
                 }
                 _ => self.prev = Some(to),
             }
         }
-        ease(&mut self.prev_a, if self.want.preview.is_some() { 1.0 } else { 0.0 }, 0.35);
+        ease(&mut self.prev_a, if self.want.preview.is_some() { 1.0 } else { 0.0 }, 0.35, s);
         if let Some(cur) = self.prev {
             let r = RECT { left: cur[0].round() as i32, top: cur[1].round() as i32, right: cur[2].round() as i32, bottom: cur[3].round() as i32 };
             let (w, h) = (r.right - r.left, r.bottom - r.top);
@@ -1953,7 +2057,7 @@ impl Fx {
             }
             self.line_at = Some(r);
         }
-        ease(&mut self.line_a, if self.want.line.is_some() { 1.0 } else { 0.0 }, 0.5);
+        ease(&mut self.line_a, if self.want.line.is_some() { 1.0 } else { 0.0 }, 0.5, s);
         if let Some(r) = self.line_at {
             self.line.present(r.left, r.top, self.line_a);
         }
@@ -1967,7 +2071,7 @@ impl Fx {
                 self.paint_panel(&c);
             }
         }
-        ease(&mut self.panel_a, if self.want.panel.is_some() { 1.0 } else { 0.0 }, 0.35);
+        ease(&mut self.panel_a, if self.want.panel.is_some() { 1.0 } else { 0.0 }, 0.35, s);
         if !self.panel_opts.is_empty() {
             let m = self.panel_margin();
             let first = self.panel_opts[0];
@@ -1984,7 +2088,7 @@ impl Fx {
                 shape(gr, &r, (0, 0), f(4), Some(c.accent), None);
             });
         }
-        ease(&mut self.hint_a, if self.want.hint && self.want.panel.is_none() { 0.55 } else { 0.0 }, 0.25);
+        ease(&mut self.hint_a, if self.want.hint && self.want.panel.is_none() { 0.55 } else { 0.0 }, 0.25, s);
         let hx = (self.area.left + self.area.right) / 2 - self.hint.size.0 / 2;
         self.hint.present(hx, self.work.top, self.hint_a);
     }
@@ -2313,6 +2417,24 @@ mod tests {
     }
     fn k(c0: i32, c1: i32, r0: i32, r1: i32) -> Cells {
         Cells { c0, c1, r0, r1 }
+    }
+
+    #[test]
+    fn la_pila_guardada_se_reconoce_desacomodada() {
+        // Barras de 40 cada 50. La 2 quedó 80 px corrida y 300 px más abajo:
+        // por la posición no sería de la pila; con el número guardado, sí.
+        let bars = [(1, rect(100, 100, 400, 140), true), (2, rect(180, 450, 480, 490), true), (3, rect(100, 150, 400, 190), true), (4, rect(900, 100, 1200, 140), true)];
+        let by_pos = find_piles(&bars, 40, 50, |_| false);
+        assert!(by_pos.iter().all(|p| !(p.ids.contains(&1) && p.ids.contains(&2))));
+        let piles = find_piles_keyed(&bars, &[7, 7, 7, 0], 40, 50, |_| false);
+        let p = piles.iter().find(|p| p.ids.contains(&1)).unwrap();
+        assert_eq!(p.ids, vec![1, 3, 2]);
+        assert_eq!((p.edge, p.top), (100, 100));
+        // La 4 (sin número) sigue reconociéndose por la posición, sola.
+        assert!(piles.iter().any(|p| p.ids == vec![4]));
+        // Un número que tiene una sola nota no hace pila.
+        let piles = find_piles_keyed(&bars, &[7, 0, 0, 0], 40, 50, |_| false);
+        assert!(piles.iter().any(|p| p.ids == vec![1, 3]));
     }
 
     #[test]

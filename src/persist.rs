@@ -115,6 +115,11 @@ pub struct NoteData {
     /// Bloqueada: solo se puede leer y copiar (ver `note::set_locked`).
     /// Como `hidden`, es de esta compu.
     pub locked: bool,
+    /// La pila en la que está (0: ninguna). La pone `snap::settle_pile` a
+    /// todas las de una pila, así se reconocen aunque se desacomoden; las
+    /// armadas a mano, sin número, se reconocen por la posición. Como la
+    /// posición, es de esta compu.
+    pub pile: u32,
     /// Última modificación de cada parte (ms desde 1970; ver `CONTENT`,
     /// `COLOR`, `GEOM`, `STATE`). 0 = nunca se guardó (nota recién
     /// creada: `app::save_all` le pone la hora).
@@ -143,6 +148,7 @@ impl NoteData {
             fmt: String::new(),
             hidden: false,
             locked: false,
+            pile: 0,
             t: [0; PARTS],
         }
     }
@@ -236,7 +242,7 @@ pub fn load_notes() -> Vec<NoteData> {
 /// se guarda una copia aparte antes de seguir: si no, el próximo guardado
 /// lo pisaba con una lista vacía y se perdían todas las notas.
 fn load_notes_from(path: &std::path::Path, now: u64) -> Vec<NoteData> {
-    if let Ok(text) = fs::read_to_string(path) {
+    if let Some(text) = fs::read_to_string(path).ok().and_then(|s| decode_notes(&s)) {
         if json::parse(&text).is_some_and(|j| j.as_array().is_some()) {
             return parse_notes(&text, now);
         }
@@ -273,8 +279,30 @@ pub fn save_notes(notes: &[NoteData]) -> bool {
     if fs::create_dir_all(data_dir()).is_err() {
         return false;
     }
+    save_notes_to(&notes_path(), notes)
+}
+
+fn save_notes_to(path: &std::path::Path, notes: &[NoteData]) -> bool {
     let body: Vec<String> = notes.iter().map(|n| format!("  {}", note_json(n, true))).collect();
-    write_atomic(&notes_path(), &format!("[\n{}\n]", body.join(",\n")))
+    let Some(text) = encode_notes(&format!("[\n{}\n]", body.join(",\n"))) else { return false };
+    write_atomic(path, &text)
+}
+
+// Sin entropía adicional: DPAPI ya liga el archivo a la cuenta de Windows.
+const NOTES_PREFIX: &str = "simpcky-dpapi:1:";
+
+fn encode_notes(text: &str) -> Option<String> {
+    Some(format!("{NOTES_PREFIX}{}", crate::crypto::b64url(&crate::crypto::protect(text.as_bytes())?)))
+}
+
+fn decode_notes(text: &str) -> Option<String> {
+    if let Some(blob) = text.strip_prefix(NOTES_PREFIX) {
+        String::from_utf8(crate::crypto::unprotect(&crate::crypto::b64url_decode(blob)?)?).ok()
+    } else if text.trim_start().starts_with(['[', '{']) {
+        Some(text.to_string())
+    } else {
+        None
+    }
 }
 
 /// Una nota en JSON. `local`: incluir el número local (`notes.json`) o
@@ -284,8 +312,9 @@ pub fn note_json(n: &NoteData, local: bool) -> String {
     let fmt = if n.fmt.is_empty() { String::new() } else { format!("\"fmt\":\"{}\",", json::escape(&n.fmt)) };
     let hidden = if local && n.hidden { "\"hidden\":true," } else { "" };
     let locked = if local && n.locked { "\"locked\":true," } else { "" };
+    let pile = if local && n.pile != 0 { format!("\"pile\":{},", n.pile) } else { String::new() };
     format!(
-        "{{{id}{hidden}{locked}\"uid\":\"{}\",\"x\":{},\"y\":{},\"w\":{},\"h\":{},\"color\":{},\"layer\":{},\"rollMode\":{},\"rolled\":{},\"title\":\"{}\",\"text\":\"{}\",{fmt}\"t\":[{},{},{},{}]}}",
+        "{{{id}{hidden}{locked}{pile}\"uid\":\"{}\",\"x\":{},\"y\":{},\"w\":{},\"h\":{},\"color\":{},\"layer\":{},\"rollMode\":{},\"rolled\":{},\"title\":\"{}\",\"text\":\"{}\",{fmt}\"t\":[{},{},{},{}]}}",
         json::escape(&n.uid),
         n.x,
         n.y,
@@ -328,6 +357,7 @@ pub fn note_from_json(j: &Json) -> Option<NoteData> {
         fmt: j.str_or("fmt", ""),
         hidden: j.bool_or("hidden", false),
         locked: j.bool_or("locked", false),
+        pile: j.u64_or("pile", 0) as u32,
         t,
     })
 }
@@ -339,7 +369,7 @@ pub fn note_from_json(j: &Json) -> Option<NoteData> {
 /// `true` si quedó escrito. Antes los errores se ignoraban, y un antivirus
 /// que no dejaba escribir hacía que la app "guardara" durante horas sin
 /// guardar nada, sin que nadie se enterara.
-fn write_atomic(path: &std::path::Path, contents: &str) -> bool {
+pub(crate) fn write_atomic(path: &std::path::Path, contents: &str) -> bool {
     let tmp = path.with_extension("json.tmp");
     if fs::write(&tmp, contents).is_ok() {
         if fs::rename(&tmp, path).is_ok() {
@@ -512,6 +542,43 @@ pub fn tombs_from_json(j: Option<&Json>) -> Vec<Tomb> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encrypted_notes_roundtrip_and_legacy() {
+        let old = r#"[{"id":1,"text":"hola","uid":"abc","t":[1,1,1,1]}]"#;
+        assert_eq!(decode_notes(old).unwrap(), old);
+        let sealed = encode_notes(old).unwrap();
+        assert!(sealed.starts_with(NOTES_PREFIX));
+        assert!(!sealed.contains("hola"));
+        assert_eq!(decode_notes(&sealed).unwrap(), old);
+        assert_eq!(parse_notes(&decode_notes(&sealed).unwrap(), 42), parse_notes(old, 42));
+        let dir = std::env::temp_dir().join(format!("simpcky-migration-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notes.json");
+        fs::write(&path, old).unwrap();
+        let notes = load_notes_from(&path, 42);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].text, "hola");
+        assert!(save_notes_to(&path, &notes));
+        assert!(fs::read_to_string(&path).unwrap().starts_with(NOTES_PREFIX));
+        assert_eq!(load_notes_from(&path, 99), notes);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn invalid_encrypted_notes_are_backed_up() {
+        let dir = std::env::temp_dir().join(format!("simpcky-encrypted-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notes.json");
+        for (i, blob) in ["!", "aG9sYQ"].iter().enumerate() {
+            let text = format!("{NOTES_PREFIX}{blob}");
+            fs::write(&path, &text).unwrap();
+            assert!(load_notes_from(&path, i as u64).is_empty());
+            assert_eq!(fs::read_to_string(path.with_extension(format!("json.ilegible-{i}"))).unwrap(), text);
+            assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn unreadable_notes_file_is_backed_up() {
