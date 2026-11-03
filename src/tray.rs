@@ -414,6 +414,25 @@ pub fn set_translucency(level: u8) {
     }
 }
 
+/// Las notas de una pila: abrirse al pasar el mouse, o con clic. Las que ya
+/// están en una pila cambian ya (y quedan enrolladas).
+pub fn toggle_pile_hover() {
+    let notes: Vec<HWND> = {
+        let mut a = app().lock().unwrap();
+        a.settings.pile_hover = !a.settings.pile_hover;
+        a.notes.values().map(|nr| nr.hwnd as HWND).filter(|h| !h.is_null()).collect()
+    };
+    save_settings();
+    let mode = crate::app::pile_roll_mode();
+    for h in notes {
+        let keyed = app().lock().unwrap().notes.get(&note::note_id(h)).is_some_and(|nr| nr.data.pile != 0);
+        if keyed || crate::snap::in_pile(h) {
+            note::set_roll_mode(h, mode);
+            note::reshape(h, None, true);
+        }
+    }
+}
+
 /// Ocultar (o no) todas las notas al compartir pantalla.
 pub fn toggle_hide_capture() {
     {

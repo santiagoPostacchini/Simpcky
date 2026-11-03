@@ -18,6 +18,7 @@ mod frames;
 mod ghost;
 mod http;
 mod icon;
+mod images;
 mod json;
 mod note;
 mod oauth;
@@ -117,6 +118,7 @@ fn main() {
         hotkey: 2,
         roll_delay: 0,
         hide_capture: false,
+        pile_hover: true,
     });
     theme::init(settings.dark);
 
@@ -172,6 +174,7 @@ fn main() {
     }
 
     snap::start_guion();
+    edges::start();
 
     if want_new {
         // La app no estaba abierta y la arrancó el clic derecho del

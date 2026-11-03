@@ -170,6 +170,12 @@ impl Grid {
         Cells { c0, c1: c1.clamp(c0, self.cols - 1), r0, r1: r1.clamp(r0, self.rows - 1) }
     }
 
+    /// El final de celda más cerca de `bottom`, sin subir de la celda donde está `top`.
+    fn snap_bottom(&self, top: i32, bottom: i32) -> i32 {
+        let r = (((bottom - self.top) as f64 - self.gap - self.ch) / (self.ch + self.gap)).round() as i32;
+        self.ey(r.clamp(self.row_of(top), self.rows - 1))
+    }
+
     /// Un ancho redondeado a celdas: entre una y `max`.
     fn width_for(&self, w: i32, max: i32) -> i32 {
         let n = ((w as f64 + self.gap) / (self.cw + self.gap)).round().clamp(1.0, max.min(self.cols) as f64);
@@ -346,7 +352,12 @@ pub fn plan_around(g: &Grid, mut t: Cells, others: &[(u32, RECT)], zones: &[Cell
 /// ancha, anclada por un borde (`right`: el derecho, en `edge`): si la
 /// columna crece, crece hacia el otro lado. Cada nota más angosta va
 /// pegada al borde izquierdo o al derecho de la columna (`sides`, `true`
-/// = derecho), según dónde se la soltó.
+/// = derecho), según dónde se la soltó. En mosaico: una nota va en la
+/// misma fila que la de arriba si esa está sola, quedan de lados distintos
+/// y entran las dos en el ancho de la columna (ver `rows`).
+///
+/// Los métodos que ubican reciben `ws`, el ancho de cada nota (en el orden
+/// de `ids`).
 #[derive(Clone, PartialEq, Debug)]
 pub struct Pile {
     pub right: bool,
@@ -368,11 +379,30 @@ impl Pile {
             (self.edge, self.edge + max_w)
         }
     }
-    /// Esquina superior izquierda de la nota `i` (de ancho `w`).
-    fn place(&self, i: usize, w: i32, max_w: i32, step: i32) -> (i32, i32) {
+    fn side(&self, i: usize) -> bool {
+        self.sides.get(i).copied().unwrap_or(self.right)
+    }
+    /// La fila de cada nota (`gap`: la separación entre dos de una fila).
+    fn rows(&self, ws: &[i32], max_w: i32, gap: i32) -> Vec<i32> {
+        let w = |i: usize| ws.get(i).copied().unwrap_or(max_w);
+        let mut rows: Vec<i32> = Vec::with_capacity(self.ids.len());
+        for i in 0..self.ids.len() {
+            let alone = i > 0 && (i < 2 || rows[i - 2] != rows[i - 1]);
+            let pairs = alone && self.side(i) != self.side(i - 1) && w(i - 1) + w(i) + gap <= max_w;
+            rows.push(match i {
+                0 => 0,
+                _ if pairs => rows[i - 1],
+                _ => rows[i - 1] + 1,
+            });
+        }
+        rows
+    }
+    /// Esquina superior izquierda de la nota `i`.
+    fn place(&self, i: usize, ws: &[i32], max_w: i32, step: i32, bar: i32) -> (i32, i32) {
         let (l, r) = self.column(max_w);
-        let right = self.sides.get(i).copied().unwrap_or(self.right);
-        (if right { r - w } else { l }, self.top + i as i32 * step)
+        let w = ws.get(i).copied().unwrap_or(max_w);
+        let row = self.rows(ws, max_w, step - bar).get(i).copied().unwrap_or(i as i32);
+        (if self.side(i) { r - w } else { l }, self.top + row * step)
     }
     /// De qué lado de la columna va una nota de ancho `w` con centro en `cx`.
     fn side_at(&self, cx: i32, w: i32, max_w: i32) -> bool {
@@ -395,14 +425,14 @@ impl Pile {
         }
     }
     /// En qué lugar entra una nota cuya barra está a la altura `cy`.
-    fn slot(&self, cy: i32, step: i32, bar: i32) -> usize {
-        (0..self.ids.len()).filter(|&i| self.top + i as i32 * step + bar / 2 < cy).count()
+    fn slot(&self, cy: i32, ws: &[i32], max_w: i32, step: i32, bar: i32) -> usize {
+        self.rows(ws, max_w, step - bar).iter().filter(|&&row| self.top + row * step + bar / 2 < cy).count()
     }
     /// Lo que ocupa, con el ancho de la nota más ancha.
-    fn bounds(&self, max_w: i32, step: i32, bar: i32) -> RECT {
+    fn bounds(&self, ws: &[i32], max_w: i32, step: i32, bar: i32) -> RECT {
         let (left, right) = self.column(max_w);
-        let n = self.ids.len().max(1) as i32;
-        RECT { left, top: self.top, right, bottom: self.top + (n - 1) * step + bar }
+        let n = self.rows(ws, max_w, step - bar).last().copied().unwrap_or(0);
+        RECT { left, top: self.top, right, bottom: self.top + n * step + bar }
     }
 }
 
@@ -483,7 +513,7 @@ pub fn find_piles_keyed(bars: &[(u32, RECT, bool)], keys: &[u32], bar: i32, step
     let mut piles: Vec<Pile> = groups
         .into_iter()
         .map(|(_, mut items)| {
-            items.sort_by_key(|b| b.1.top);
+            items.sort_by_key(|b| (b.1.top, b.1.left));
             let (l, r) = (items.iter().map(|b| b.1.left).min().unwrap_or(0), items.iter().map(|b| b.1.right).max().unwrap_or(0));
             let right = right_side((l + r) / 2);
             let sides = items
@@ -704,10 +734,12 @@ fn settle_pile(pile: &Pile, by_id: &HashMap<u32, Info>, step: i32) {
     for id in &pile.ids {
         set_pile_key(*id, key);
     }
-    let max_w = pile.ids.iter().filter_map(|k| by_id.get(k)).map(|n| n.w).max().unwrap_or(0);
+    let ws: Vec<i32> = pile.ids.iter().map(|k| by_id.get(k).map_or(0, |n| n.w)).collect();
+    let max_w = ws.iter().copied().max().unwrap_or(0);
+    let bar = pile.ids.iter().filter_map(|k| by_id.get(k)).map(|n| n.bar).next().unwrap_or(step);
     for (i, id) in pile.ids.iter().enumerate() {
         if let Some(n) = by_id.get(id) {
-            let (x, y) = pile.place(i, n.w, max_w, step);
+            let (x, y) = pile.place(i, &ws, max_w, step, bar);
             anim::to_pos(n.hwnd, x, y, anim::MOVE_MS);
             store(*id, x, y, None);
         }
@@ -816,6 +848,12 @@ struct Drag {
     left_pile: bool,
     /// La pila de la que salió, si quedó en otro monitor: se cierra al soltar.
     behind: Option<(Pile, HashMap<u32, Info>, i32)>,
+    /// Cambiando el tamaño: el rectángulo nuevo (en WM_WINDOWPOSCHANGING la
+    /// ventana todavía mide lo de antes, y el hueco de la cuadrícula quedaba
+    /// con esa medida: se veía como una sombra).
+    sized: Option<RECT>,
+    /// Cambiando el largo de una nota de pila: dónde se mandó a cada una.
+    placed: Vec<(i32, i32)>,
 }
 
 thread_local! {
@@ -940,6 +978,8 @@ fn build_drag(hwnd: HWND, kind: Kind, grab: POINT, pt: POINT, carry: &[Info]) ->
         monitor,
         left_pile: from.is_some(),
         behind: None,
+        sized: None,
+        placed: Vec::new(),
     }
 }
 
@@ -1003,7 +1043,7 @@ pub fn make_pile(hwnd: HWND) {
         }
         _ => np,
     };
-    crate::note::set_roll_mode(hwnd, RollMode::Auto);
+    crate::note::set_roll_mode(hwnd, crate::app::pile_roll_mode());
     crate::note::reshape(hwnd, None, true);
     settle_pile(&pile, &d.by_id, d.step);
     QUIET.set(hwnd as isize);
@@ -1034,6 +1074,11 @@ fn button_down() -> bool {
     if FAKE.get().is_some() {
         return true;
     }
+    primary_held()
+}
+
+/// El botón principal del mouse (el izquierdo, o el derecho si están invertidos), el de verdad.
+pub fn primary_held() -> bool {
     let vk = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 { VK_RBUTTON } else { VK_LBUTTON };
     (unsafe { GetAsyncKeyState(vk as i32) }) < 0
 }
@@ -1128,14 +1173,34 @@ impl Drag {
         *self = d;
     }
 
+    /// ¿La nota que se lleva está en una pila de dos o más? (Asomada no:
+    /// está en otro lado y al volver queda como estaba.)
+    fn in_pile(&self) -> bool {
+        let peeking = app().lock().unwrap().notes.get(&self.id).is_some_and(|nr| nr.peeking);
+        !peeking && self.piles.iter().any(|p| p.ids.len() >= 2 && p.ids.contains(&self.id))
+    }
+
     fn max_w(&self, p: &Pile) -> i32 {
         p.ids.iter().filter_map(|k| self.by_id.get(k)).map(|n| n.w).max().unwrap_or(0)
+    }
+
+    /// El ancho de cada nota de la pila.
+    fn ws(&self, p: &Pile) -> Vec<i32> {
+        p.ids.iter().map(|k| self.by_id.get(k).map_or(0, |n| n.w)).collect()
+    }
+
+    fn bounds_of(&self, p: &Pile, max_w: i32) -> RECT {
+        p.bounds(&self.ws(p), max_w, self.step, self.bar)
+    }
+
+    fn slot_in(&self, p: &Pile, cy: i32) -> usize {
+        p.slot(cy, &self.ws(p), self.max_w(p), self.step, self.bar)
     }
 
     /// Las celdas de cada pila (salvo la que se mueve entera).
     /// ¿La pila queda entera detrás de aplicaciones? (Entonces no se ve: ni zona ni destino.)
     fn hidden(&self, p: &Pile) -> bool {
-        let k = self.grid.cells_of(&p.bounds(self.max_w(p), self.step, self.bar));
+        let k = self.grid.cells_of(&self.bounds_of(p, self.max_w(p)));
         !self.blocked.is_empty() && (k.r0..=k.r1).all(|r| (k.c0..=k.c1).all(|c| self.blocked.iter().any(|b| b.has(c, r))))
     }
 
@@ -1144,7 +1209,7 @@ impl Drag {
             .iter()
             .enumerate()
             .filter(|(i, p)| !p.ids.is_empty() && Some(*i) != self.moving && !self.hidden(p))
-            .map(|(i, p)| (i, self.grid.cells_of(&p.bounds(self.max_w(p), self.step, self.bar))))
+            .map(|(i, p)| (i, self.grid.cells_of(&self.bounds_of(p, self.max_w(p)))))
             .collect()
     }
 
@@ -1223,10 +1288,10 @@ impl Drag {
             self.moved = true;
             if let Some(p) = self.from {
                 let pile = self.piles[p].clone();
-                let max_w = self.max_w(&pile);
+                let (ws, max_w) = (self.ws(&pile), self.max_w(&pile));
                 for (i, id) in pile.ids.iter().enumerate() {
                     if let Some(n) = self.by_id.get(id) {
-                        let (px_, py_) = pile.place(i, n.w, max_w, self.step);
+                        let (px_, py_) = pile.place(i, &ws, max_w, self.step, self.bar);
                         anim::to_pos(n.hwnd, px_, py_, anim::MOVE_MS);
                     }
                 }
@@ -1276,7 +1341,7 @@ impl Drag {
             Target::None
         } else if grid_on {
             if let Some((p, _)) = zones.iter().find(|(_, z)| contains(&self.grid.rect(*z), pt)) {
-                Target::Pile(*p, self.piles[*p].slot(pt.y, self.step, self.bar), self.side_in(*p, x + w / 2))
+                Target::Pile(*p, self.slot_in(&self.piles[*p], pt.y), self.side_in(*p, x + w / 2))
             } else {
                 let (a, b) = match self.mode {
                     Some(Choice::Shape(a, b)) => (a, b),
@@ -1294,11 +1359,11 @@ impl Drag {
                 if p.ids.is_empty() || self.hidden(p) {
                     return false;
                 }
-                let b = p.bounds(self.max_w(p).max(w), self.step, self.bar);
+                let b = self.bounds_of(p, self.max_w(p).max(w));
                 pt.x >= b.left - margin && pt.x <= b.right + margin && cy >= b.top - self.bar && cy <= b.bottom + px(self.dpi, 20)
             });
             match hit {
-                Some((i, p)) => Target::Pile(i, p.slot(cy, self.step, self.bar), self.side_in(i, x + w / 2)),
+                Some((i, p)) => Target::Pile(i, self.slot_in(p, cy), self.side_in(i, x + w / 2)),
                 // Una pila nueva no se apila encima de otra: se suma a esa.
                 None if self.mode == Some(Choice::Pile) => self.pile_under(&self.new_pile(), None).unwrap_or(Target::NewPile),
                 None => Target::None,
@@ -1311,9 +1376,9 @@ impl Drag {
     /// La pila (de las que no se mueven) sobre la que caería `probe`, y en
     /// qué lugar entraría: dos pilas no se apilan una encima de la otra.
     fn pile_under(&self, probe: &Pile, skip: Option<usize>) -> Option<Target> {
-        let pb = probe.bounds(self.max_w(probe), self.step, self.bar);
-        let (k, o) = self.piles.iter().enumerate().find(|(k, o)| Some(*k) != skip && !o.ids.is_empty() && !self.hidden(o) && overlaps(&pb, &o.bounds(self.max_w(o), self.step, self.bar)))?;
-        Some(Target::Pile(k, o.slot(probe.top + self.bar / 2, self.step, self.bar), self.side_in(k, (pb.left + pb.right) / 2)))
+        let pb = self.bounds_of(probe, self.max_w(probe));
+        let (k, o) = self.piles.iter().enumerate().find(|(k, o)| Some(*k) != skip && !o.ids.is_empty() && !self.hidden(o) && overlaps(&pb, &self.bounds_of(o, self.max_w(o))))?;
+        Some(Target::Pile(k, self.slot_in(o, probe.top + self.bar / 2), self.side_in(k, (pb.left + pb.right) / 2)))
     }
 
     /// De qué lado de la pila `k` iría la nota que se lleva, con centro en `cx`.
@@ -1329,10 +1394,12 @@ impl Drag {
         let Some(p) = self.moving else { return };
         let pt = cursor();
         self.moved = true;
-        let i = self.piles[p].ids.iter().position(|k| *k == self.id).unwrap_or(0) as i32;
+        let mv = &self.piles[p];
+        let at = mv.ids.iter().position(|k| *k == self.id).unwrap_or(0);
+        // La fila de la que se agarró (en mosaico, no es su lugar en la lista).
+        let i = mv.rows(&self.ws(mv), self.max_w(mv), self.step - self.bar).get(at).copied().unwrap_or(0);
         let w = self.by_id.get(&self.id).map(|n| n.w).unwrap_or(0);
         let (x, y) = (pt.x - self.grab.x, pt.y - self.grab.y);
-        let mv = &self.piles[p];
         let edge = if mv.right { self.grid.snap_right_edge(x + w) } else { self.grid.snap_left_edge(x) };
         let probe = Pile { edge, top: self.grid.snap_top(y - i * self.step), ..mv.clone() };
         self.target = self.pile_under(&probe, Some(p)).unwrap_or(Target::None);
@@ -1347,10 +1414,10 @@ impl Drag {
             // Cada pila a su lugar: la que se arma (o la que se mueve) y las demás como estaban.
             let others: Vec<Pile> = self.piles.iter().enumerate().filter(|(k, _)| *k != p && Some(*k) != self.target_pile()).map(|(_, o)| o.clone()).collect();
             for pile in others.iter().chain(std::iter::once(&layout)) {
-                let max_w = self.max_w(pile);
+                let (ws, max_w) = (self.ws(pile), self.max_w(pile));
                 for (j, id) in pile.ids.iter().enumerate() {
                     if let Some(n) = self.by_id.get(id) {
-                        let (nx, ny) = pile.place(j, n.w, max_w, self.step);
+                        let (nx, ny) = pile.place(j, &ws, max_w, self.step, self.bar);
                         anim::to_pos(n.hwnd, nx, ny, 130);
                     }
                 }
@@ -1359,7 +1426,7 @@ impl Drag {
             let plan = if matches!(self.target, Target::Pile(..)) {
                 Vec::new()
             } else {
-                let t = self.grid.cells_of(&layout.bounds(self.max_w(&layout), self.step, self.bar));
+                let t = self.grid.cells_of(&self.bounds_of(&layout, self.max_w(&layout)));
                 plan_around(&self.grid, t, &self.other_rects(), &[]).1
             };
             self.replan(plan);
@@ -1389,25 +1456,60 @@ impl Drag {
 
     /// Ctrl al redimensionar: el rectángulo va por celdas.
     fn update_size(&mut self, r: &mut RECT) {
-        let zones = self.zones();
-        // Una nota de pila (enrollada): solo cambia de largo, de a una celda con
-        // Ctrl y hasta dos celdas, y su lado alineado con la pila queda donde estaba.
-        if self.by_id.get(&self.id).is_some_and(|n| n.rolled) {
+        // Una nota de pila (enrollada, o abierta sin salir de la pila): cambia
+        // de largo de a una celda con Ctrl y hasta dos celdas, y su lado
+        // alineado con la pila queda donde estaba. Abierta, cambia de alto
+        // por abajo; arriba sigue en su fila.
+        let rolled = self.by_id.get(&self.id).is_some_and(|n| n.rolled);
+        if rolled || self.in_pile() {
             let raw = (r.right - r.left).min(self.grid.width_for(i32::MAX, PILE_MAX_CELLS));
-            let w = if ctrl_down() { self.grid.width_for(raw, PILE_MAX_CELLS) } else { raw };
-            let left = match self.piles.iter().find(|p| p.ids.contains(&self.id)) {
+            let w = if !rolled && r.right - r.left == self.orig.rect.right - self.orig.rect.left {
+                // Abierta y estirada solo de alto: el largo no se toca.
+                r.right - r.left
+            } else if ctrl_down() {
+                self.grid.width_for(raw, PILE_MAX_CELLS)
+            } else {
+                raw
+            };
+            // La pila (su zona y sus huecos) ya con el largo nuevo.
+            if let Some(n) = self.by_id.get_mut(&self.id) {
+                n.w = w;
+            }
+            let left = match self.piles.iter().find(|p| p.ids.contains(&self.id)).cloned() {
                 Some(p) => {
                     let i = p.ids.iter().position(|k| *k == self.id).unwrap_or(0);
-                    let others = p.ids.iter().filter(|k| **k != self.id).filter_map(|k| self.by_id.get(k)).map(|n| n.w).max().unwrap_or(0);
-                    p.place(i, w, others.max(w), self.step).0
+                    let (ws, max_w) = (self.ws(&p), self.max_w(&p));
+                    let placed: Vec<(i32, i32)> = (0..p.ids.len()).map(|j| p.place(j, &ws, max_w, self.step, self.bar)).collect();
+                    // Las demás se reacomodan ya (con el largo nuevo dos notas
+                    // pueden dejar de entrar en una fila, o empezar a entrar).
+                    if placed != self.placed {
+                        for (j, id) in p.ids.iter().enumerate() {
+                            if let Some(n) = self.by_id.get(id).filter(|_| *id != self.id) {
+                                anim::to_pos(n.hwnd, placed[j].0, placed[j].1, 130);
+                            }
+                        }
+                        self.placed = placed.clone();
+                    }
+                    placed[i].0
                 }
                 None => r.left,
             };
-            *r = RECT { left, top: r.top, right: left + w, bottom: r.top + self.bar };
+            let top = if rolled { r.top } else { self.orig.rect.top };
+            let bottom = match (rolled, ctrl_down()) {
+                (true, _) => top + self.bar,
+                // Con Ctrl, abierta termina donde termina una celda.
+                (false, true) => self.grid.snap_bottom(top, r.bottom).max(top + self.bar),
+                (false, false) => r.bottom.max(top + self.bar),
+            };
+            *r = RECT { left, top, right: left + w, bottom };
+            self.sized = Some(*r);
+            let zones = self.zones();
             self.show(ctrl_down(), &zones, None);
             return;
         }
+        let zones = self.zones();
         if !ctrl_down() {
+            self.sized = Some(*r);
             self.target = Target::None;
             self.replan(Vec::new());
             self.show(false, &zones, None);
@@ -1416,6 +1518,7 @@ impl Drag {
         let zc: Vec<Cells> = zones.iter().map(|z| z.1).chain(self.blocked.iter().copied()).collect();
         let (t, plan) = plan_around(&self.grid, self.grid.snap_rect(r), &self.other_rects(), &zc);
         *r = self.grid.rect(t);
+        self.sized = Some(*r);
         self.target = Target::None;
         self.replan(plan);
         self.show(true, &zones, None);
@@ -1433,7 +1536,7 @@ impl Drag {
     /// Lo que tapa la cuadrícula: la nota que se lleva, las sueltas (donde
     /// van a quedar) y las barras de las pilas.
     fn holes(&self) -> Vec<RECT> {
-        let mut v = vec![window_rect(self.hwnd)];
+        let mut v = vec![self.sized.unwrap_or_else(|| window_rect(self.hwnd))];
         for id in &self.others {
             if let Some(n) = self.by_id.get(id) {
                 v.push(match self.plan.iter().find(|p| p.0 == *id) {
@@ -1443,10 +1546,10 @@ impl Drag {
             }
         }
         for pile in &self.piles {
-            let max_w = self.max_w(pile);
+            let (ws, max_w) = (self.ws(pile), self.max_w(pile));
             for (i, id) in pile.ids.iter().enumerate() {
                 if let Some(n) = self.by_id.get(id) {
-                    let (x, y) = pile.place(i, n.w, max_w, self.step);
+                    let (x, y) = pile.place(i, &ws, max_w, self.step, self.bar);
                     v.push(RECT { left: x, top: y, right: x + n.w, bottom: y + self.bar });
                 }
             }
@@ -1477,21 +1580,26 @@ impl Drag {
             Target::NewPile => {
                 let pile = self.new_pile();
                 let w = self.by_id.get(&self.id).map(|n| n.w).unwrap_or(0);
-                let (x, y) = pile.place(0, w, w, self.step);
+                let (x, y) = pile.place(0, &[w], w, self.step, self.bar);
                 preview = Some(RECT { left: x, top: y, right: x + w, bottom: y + self.bar });
             }
             Target::Pile(p, idx, side) => {
                 // La línea mide lo que la nota y va del lado donde va a quedar.
+                // (En mosaico puede ir al lado de otra: la línea va arriba de su fila.)
                 let pile = &self.piles[p];
                 let me_w = self.by_id.get(&self.id).map(|n| n.w).unwrap_or(0);
                 let max_w = self.max_w(pile).max(me_w);
                 let (l, r) = pile.column(max_w);
+                let (mut after, mut ws) = (pile.clone(), self.ws(pile));
+                let at = idx.min(ws.len());
+                after.insert(at, self.id, side);
+                ws.insert(at, me_w);
+                let (nx, ny) = after.place(at, &ws, max_w, self.step, self.bar);
                 let (left, right) = match self.kind {
                     Kind::PileMove => (l, r),
-                    _ if side => (r - me_w, r),
-                    _ => (l, l + me_w),
+                    _ => (nx, nx + me_w),
                 };
-                let y = pile.top + idx as i32 * self.step - px(self.dpi, PILE_GAP) / 2;
+                let y = ny - px(self.dpi, PILE_GAP) / 2;
                 let t = px(self.dpi, 3).max(2);
                 line = Some(RECT { left, top: y - t / 2, right, bottom: y - t / 2 + t });
             }
@@ -1589,7 +1697,12 @@ fn end(cancel: bool) {
         }
     }
     match d.kind {
-        Kind::Size => {}
+        // Una nota de pila con otro largo: la pila queda acomodada (y guardada) con ese largo.
+        Kind::Size => {
+            if let Some(p) = d.piles.iter().find(|p| p.ids.contains(&d.id)).filter(|_| d.in_pile()) {
+                settle_pile(p, &d.by_id, d.step);
+            }
+        }
         Kind::PileMove => match (d.target, d.moving) {
             (Target::Pile(k, idx, _), _) => settle_pile(&d.merged(k, idx), &d.by_id, d.step),
             (_, Some(p)) => settle_pile(&d.piles[p], &d.by_id, d.step),
@@ -1622,7 +1735,7 @@ fn end(cancel: bool) {
                     let mut pile = d.piles[p].clone();
                     pile.insert(i, d.id, side);
                     // En una pila, la nota se despliega sola al pasarle el mouse.
-                    crate::note::set_roll_mode(hwnd, RollMode::Auto);
+                    crate::note::set_roll_mode(hwnd, crate::app::pile_roll_mode());
                     crate::note::reshape(hwnd, None, true);
                     settle_pile(&pile, &d.by_id, d.step);
                 }
@@ -1631,7 +1744,7 @@ fn end(cancel: bool) {
                         n.pile = 0;
                     }
                     let pile = d.new_pile();
-                    crate::note::set_roll_mode(hwnd, RollMode::Auto);
+                    crate::note::set_roll_mode(hwnd, crate::app::pile_roll_mode());
                     crate::note::reshape(hwnd, None, true);
                     settle_pile(&pile, &d.by_id, d.step);
                 }
@@ -1667,8 +1780,10 @@ fn end(cancel: bool) {
 //   foto <nombre>                     avisa en el registro y espera 400 ms
 //   soltar | esc
 //   hacer_pila <título>               como Ctrl + Mayús + clic en su barra
+//   abrir <título>                    como elegirla en el selector (se asoma)
 //   opcion <i>                        el cursor a una opción del panel (0-3 formas, 4 pila, 5 tacho)
-//   estirar <título> <dw> <dh> <ms>   cambia el tamaño desde abajo a la derecha
+//   estirar <título> <dw> <dh> <ms> [ctrl]  cambia el tamaño desde abajo a la derecha
+//                                     (ctrl: lo aprieta después de empezar)
 //   sobre <título> <dx> <dy>          el cursor sobre esa nota, sin agarrarla (para
 //                                     ver el despliegue al pasar el mouse, y con Ctrl)
 
@@ -1789,6 +1904,12 @@ unsafe extern "system" fn guion_tick(_: HWND, _: u32, id: usize, _: u32) {
                     step();
                 }
             }
+            // Como elegirla en el selector (Ctrl+Alt+N): se asoma bajo el cursor.
+            "abrir" => {
+                if let Some(h) = args.first().and_then(|t| note_by_title(t)) {
+                    crate::note::open_by_id(crate::note::note_id(h));
+                }
+            }
             "hacer_pila" => {
                 if let Some(h) = args.first().and_then(|t| note_by_title(t)) {
                     let r = window_rect(h);
@@ -1807,6 +1928,10 @@ unsafe extern "system" fn guion_tick(_: HWND, _: u32, id: usize, _: u32) {
                         let r0 = window_rect(h);
                         FAKE.set(Some(POINT { x: r0.right - 2, y: r0.bottom - 2 }));
                         begin_size(h);
+                        // Ctrl recién al empezar (antes, una nota de pila abierta se enrollaría).
+                        if args.get(4).is_some_and(|a| a == "ctrl") {
+                            FAKE_CTRL.set(Some(true));
+                        }
                         GUION.with(|g| {
                             if let Some(g) = g.borrow_mut().as_mut() {
                                 g.sizing = Some((h, r0));
@@ -2461,6 +2586,11 @@ mod tests {
         let two = g.rect(k(2, 3, 0, 0));
         assert_eq!(g.snap_rect(&rect(two.left + 10, two.top, two.right + 40, two.bottom)), k(2, 3, 0, 0));
         assert_eq!(g.shape_for(280, 320), (1, 2));
+        // El fondo va al final de celda más cercano, nunca arriba de la celda de su barra.
+        let (r0, r1) = (g.rect(k(0, 0, 0, 0)), g.rect(k(0, 0, 1, 1)));
+        assert_eq!(g.snap_bottom(r0.top + 50, r1.bottom - 20), r1.bottom);
+        assert_eq!(g.snap_bottom(r0.top + 50, r1.top + 10), r0.bottom);
+        assert_eq!(g.snap_bottom(r1.top + 50, r0.bottom), r1.bottom);
     }
 
     #[test]
@@ -2550,14 +2680,33 @@ mod tests {
     #[test]
     fn lugar_en_la_pila() {
         let p = Pile { right: true, edge: 1000, top: 100, ids: vec![1, 2, 3], sides: vec![true, false, true] };
-        assert_eq!(p.slot(90, 50, 40), 0);
-        assert_eq!(p.slot(130, 50, 40), 1);
-        assert_eq!(p.slot(400, 50, 40), 3);
+        let ws = [500, 300, 300];
+        assert_eq!(p.slot(90, &ws, 500, 50, 40), 0);
+        assert_eq!(p.slot(130, &ws, 500, 50, 40), 1);
+        assert_eq!(p.slot(400, &ws, 500, 50, 40), 3);
         // Columna de 500 anclada a la derecha en 1000: la 3 a la derecha, la 2 a la izquierda.
-        assert_eq!(p.place(2, 300, 500, 50), (700, 200));
-        assert_eq!(p.place(1, 300, 500, 50), (500, 150));
+        assert_eq!(p.place(2, &ws, 500, 50, 40), (700, 200));
+        assert_eq!(p.place(1, &ws, 500, 50, 40), (500, 150));
         // Una nota chica soltada del lado izquierdo de la columna va a la izquierda.
         assert!(!p.side_at(560, 200, 500));
         assert!(p.side_at(900, 200, 500));
+    }
+
+    #[test]
+    fn mosaico_en_la_pila() {
+        // Una ancha (500) y abajo dos chicas (200, 250) de lados distintos: misma fila.
+        let p = Pile { right: true, edge: 1000, top: 100, ids: vec![1, 2, 3, 4], sides: vec![true, false, true, true] };
+        let ws = [500, 200, 250, 200];
+        assert_eq!(p.rows(&ws, 500, 10), vec![0, 1, 1, 2]);
+        assert_eq!(p.place(1, &ws, 500, 50, 40), (500, 150));
+        assert_eq!(p.place(2, &ws, 500, 50, 40), (750, 150));
+        assert_eq!(p.place(3, &ws, 500, 50, 40), (800, 200));
+        assert_eq!(p.bounds(&ws, 500, 50, 40).bottom, 240);
+        // La de abajo de la fila doble cae en la fila siguiente.
+        assert_eq!(p.slot(175, &ws, 500, 50, 40), 3);
+        // Del mismo lado, o sin lugar, no comparten fila.
+        let q = Pile { sides: vec![true, false, false, true], ..p.clone() };
+        assert_eq!(q.rows(&ws, 500, 10), vec![0, 1, 2, 2]);
+        assert_eq!(p.rows(&[500, 300, 250, 200], 500, 10), vec![0, 1, 2, 3]);
     }
 }

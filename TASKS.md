@@ -1,5 +1,55 @@
 # Tareas
 
+## En curso (rama `feat/pedidos-noviembre`, sale de master)
+
+- Claude — Imágenes en las notas: `Ctrl+V` de una captura, en su párrafo, ajustada al ancho
+  (`images.rs`; PNG en `fmt` como `p<carácter>:<base64>`). Tests: `imagenes_en_el_formato`,
+  `png_ida_y_vuelta`, y con RichEdit real `--ignored imagen pegar_imagen`.
+- Claude — Auto no se abre con el botón del mouse apretado (seleccionando en otra nota).
+- Claude — Ajuste "Abrir las notas de una pila al pasar el mouse" (`pileHover`): apagado, las de
+  una pila quedan en Manual y se abren con clic.
+- Claude — Cuadro de renombrar del ancho del nombre (crece al escribir): el resto de la barra enrolla.
+- Claude — Mosaico en pilas: una nota va en la fila de la de arriba si queda del otro lado y entran
+  las dos (`Pile::rows`, test `mosaico_en_la_pila`).
+- Claude — Marco del borde: aparece al entrar por el borde (`WM_NCMOUSEMOVE`) y al acercarse desde
+  el escritorio (`edges::poll`, cada 40 ms).
+- Falta probar a mano: todo lo anterior con el mouse real (pegar una captura de verdad, el mosaico
+  al soltar, el marco desde afuera); imágenes en modo vidrio y en una nota bloqueada.
+- Claude — Sombra al achicar con `Ctrl` + borde: era el hueco de la cuadrícula con la medida vieja
+  (en `WM_WINDOWPOSCHANGING` la ventana todavía no cambió; en una pila, el ancho de `by_id`). Ahora
+  usa el rectángulo nuevo (`Drag::sized`). Sin probar con el mouse real.
+- Claude — Huecos negros al arrastrar en una pila con mosaico: al cambiarle el largo a una nota de
+  pila, la pila no se reacomodaba (dos notas seguían en una fila armada para una columna más ancha) y
+  los huecos de la cuadrícula se calculaban con el largo nuevo. Ahora las demás se reacomodan mientras
+  se cambia el largo y, al soltar, `settle_pile` la deja guardada así (`on_move_end` va antes que
+  `finish_size` para no pisar la fila nueva). Sin probar con el mouse real.
+- Claude — Nota de pila abierta: con `Ctrl` + borde salía de la pila (el reparto de celdas la sacaba
+  de la zona de su propia pila). Ahora va como la enrollada: largo anclado a su lado de la pila,
+  alto por abajo (con `Ctrl`, hasta el final de una celda: `Grid::snap_bottom`), y al soltar la
+  pila se reacomoda. Asomada no cuenta (vuelve como estaba).
+- Claude — Mostrar u ocultar texto oculto movía la vista un renglón: `Quiet` restauraba el
+  desplazamiento con el RichEdit congelado y no tomaba; ahora lo hace después de descongelar.
+  Test `mostrar_oculto_no_mueve_la_vista`.
+- Claude — Prueba de uso real de pilas sin mouse ni capturas: `examples/pilas_guion.py` (achicar con
+  `Ctrl` la de arriba de un mosaico, abrir una nota de la pila y estirarla con `Ctrl`, sacar una nota
+  y volver a meterla; revisa la pila en cada paso y lo guardado). Pasa. Arreglo que salió de ahí:
+  estirar solo de alto una nota de pila abierta ya no le cambia el largo. `estirar` del guion acepta
+  `ctrl` (lo aprieta después de empezar).
+- Claude — Nota enrollada llamada con el selector (o "Todas las notas"): se abría para asomarse y al
+  volver quedaba abierta en su lugar, tapando a las de abajo de su pila (y al pasar el mouse
+  parpadeaban). Ahora vuelve enrollada (`NoteRuntime::peek_unrolled`). Reproducido y verificado con
+  una instancia de prueba en vidrio; el guion acepta `abrir <título>`. El parpadeo en sí no se probó
+  con el mouse real.
+- Hallazgo (sin arreglar): en un monitor a 150 % las notas enrolladas arrancan con 60 px de alto y
+  `header_h` dice 40; al tocarlas pasan a 40. No pasa en el monitor principal (100 %).
+- Pendiente (usuario decide) — Free y Plus en Microsoft Store: plan en
+  `docs/plan-tienda-free-plus.md`. Antes de empezar: licencia del repo, el EXE de GitHub y qué va en
+  Plus.
+- Claude — Imagen pegada debajo de una clave: heredaba el texto oculto y se le dibujaba la cápsula
+  al costado. Una imagen nunca es oculta (al pegar, al guardar y al cargar; test `imagen_nunca_oculta`).
+- Claude — Con "Ocultar las notas al compartir pantalla" apagado, también salen las que tienen texto
+  oculto (pedido del usuario).
+
 ## En curso (rama `feat/fluidez-y-limites`, sale de master)
 
 - Claude — Cuadros al ritmo de la pantalla (`frames.rs`, `DwmFlush`) para transiciones, arrastre y

@@ -28,6 +28,8 @@ pub struct NoteRuntime {
     /// Widget de escritorio "asomado" al frente (abierto desde "Todas
     /// las notas"): vuelve a anclarse solo al perder el foco.
     pub peeking: bool,
+    /// Estaba enrollada y se abrió para asomarse: al volver se enrolla.
+    pub peek_unrolled: bool,
     /// El usuario confirmó "Eliminar" (o la borraron en otra compu): el
     /// WM_DESTROY que sigue sí borra los datos. Cualquier otra
     /// destrucción (Explorer reiniciándose, cierre de sesión) los
@@ -90,6 +92,15 @@ pub fn set_shutting_down() {
 
 pub fn is_shutting_down() -> bool {
     SHUTTING_DOWN.load(Ordering::Relaxed)
+}
+
+/// Cómo se abren las notas de una pila (ver `Settings::pile_hover`).
+pub fn pile_roll_mode() -> RollMode {
+    if app().lock().unwrap().settings.pile_hover {
+        RollMode::Auto
+    } else {
+        RollMode::Manual
+    }
 }
 
 pub fn default_roll_mode() -> RollMode {

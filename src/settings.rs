@@ -92,6 +92,7 @@ pub enum Hit {
     Autostart,
     DesktopMenu,
     HideCapture,
+    PileHover,
     CheckUpdate,
     InstallUpdate,
     AutoUpdate,
@@ -135,9 +136,9 @@ enum Row {
 /// Las filas, con su lugar (coordenadas del contenido), para un ancho
 /// de cliente `cw`.
 fn rows(cw: i32) -> Vec<(Row, RECT)> {
-    let (roll_auto, desktop_menu, hide_capture) = {
+    let (roll_auto, desktop_menu, hide_capture, pile_hover) = {
         let a = app().lock().unwrap();
-        (a.settings.default_roll_mode == RollMode::Auto, a.settings.desktop_menu, a.settings.hide_capture)
+        (a.settings.default_roll_mode == RollMode::Auto, a.settings.desktop_menu, a.settings.hide_capture, a.settings.pile_hover)
     };
     let version = crate::update::version_text(crate::update::current());
     let update = match crate::update::available() {
@@ -156,6 +157,8 @@ fn rows(cw: i32) -> Vec<(Row, RECT)> {
         (Row::Hint(if crate::drive_crypto::enabled() { "Cifrado con contraseña activado en esta compu." } else { "La copia de Drive se guarda sin contraseña." }), HINT_H),
         (Row::Section("NOTAS"), SECTION_H),
         (Row::Switch(Hit::AutoRoll, "Enrollar las nuevas al quitar el mouse", roll_auto), ROW_H),
+        (Row::Switch(Hit::PileHover, "Abrir las notas de una pila al pasar el mouse", pile_hover), ROW_H),
+        (Row::Hint("Si no, se abren y se enrollan con un clic en la barra."), HINT_H),
         (Row::Label("Esperar antes de enrollar"), 28),
         (Row::Segments(Choice::RollDelay), SEGMENTS_H),
         (Row::Hint("Si el mouse vuelve a la nota antes de que pase, no se enrolla."), HINT_H),
@@ -164,7 +167,7 @@ fn rows(cw: i32) -> Vec<(Row, RECT)> {
         (Row::Hint(hotkey_hint), HINT_H),
         (Row::Section("PRIVACIDAD"), SECTION_H),
         (Row::Switch(Hit::HideCapture, "Ocultar las notas al compartir pantalla", hide_capture), ROW_H),
-        (Row::Hint("Teams, Zoom, Discord, OBS y las capturas no las ven. Las que tienen texto oculto, nunca."), HINT_H),
+        (Row::Hint("Teams, Zoom, Discord, OBS y las capturas no las ven. Apagado, el texto oculto sale tapado."), HINT_H),
         (Row::Section("APARIENCIA"), SECTION_H),
         (Row::Switch(Hit::Dark, "Modo oscuro", theme::is_dark()), ROW_H),
         (Row::Label("Transparencia (requiere Windhawk)"), 28),
@@ -276,6 +279,7 @@ pub fn click(hit: Hit) {
         Hit::Autostart => crate::shell::set_autostart(!crate::shell::is_autostart_enabled()),
         Hit::DesktopMenu => crate::tray::toggle_desktop_menu(),
         Hit::HideCapture => crate::tray::toggle_hide_capture(),
+        Hit::PileHover => crate::tray::toggle_pile_hover(),
         Hit::CheckUpdate => crate::update::check_now(),
         Hit::InstallUpdate => crate::update::install(),
         Hit::AutoUpdate => crate::update::toggle_auto(),

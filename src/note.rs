@@ -132,6 +132,7 @@ pub fn create_note(data: NoteData) -> HWND {
                 hwnd: 0,
                 edit: 0,
                 peeking: false,
+                peek_unrolled: false,
                 deleting: false,
                 last_active: 0,
             },
@@ -978,7 +979,8 @@ fn handle_hover_tick(hwnd: HWND) {
     let change = {
         let mut a = app().lock().unwrap();
         match a.notes.get_mut(&id) {
-            Some(nr) if nr.data.roll_mode == RollMode::Auto && hovered && nr.data.rolled => {
+            // Con el botón apretado (seleccionando en otra nota) no se abre: se abre al soltarlo, si sigue encima.
+            Some(nr) if nr.data.roll_mode == RollMode::Auto && hovered && nr.data.rolled && !crate::snap::primary_held() => {
                 nr.data.rolled = false;
                 Some((false, nr.data.w, nr.data.h, nr.edit as HWND))
             }
@@ -1187,6 +1189,7 @@ fn switch_layer_window(hwnd: HWND, to_top: bool) {
                     nr.data.y = rc.top;
                 }
                 nr.peeking = false;
+                nr.peek_unrolled = false;
             }
             KillTimer(hwnd, TIMER_DESKTOP_WATCH);
             KillTimer(hwnd, TIMER_PEEK_END);
@@ -1309,17 +1312,22 @@ fn anchor_widget(hwnd: HWND) {
     let restore = {
         let mut a = app().lock().unwrap();
         a.notes.get_mut(&id).and_then(|nr| {
-            let restore = nr.peeking.then_some((nr.data.x, nr.data.y, nr.data.w, nr.data.h, nr.data.rolled));
+            // Si se abrió para asomarse, vuelve enrollada: abierta tapaba a
+            // las de abajo en su pila (y peleaban por quedar arriba).
+            if nr.peeking && std::mem::take(&mut nr.peek_unrolled) && !nr.data.rolled {
+                nr.data.rolled = true;
+            }
+            let restore = nr.peeking.then_some((nr.data.x, nr.data.y, nr.data.w, nr.data.h, nr.data.rolled, nr.edit as HWND));
             nr.peeking = false;
             restore
         })
     };
-    if let Some((x, y, w, h, rolled)) = restore {
+    if let Some((x, y, w, h, rolled, edit)) = restore {
         // Vuelve al lugar y al tamaño guardados, sin corregir el dato por este monitor.
         let (x, y) = clamp_to_work_area(x, y, w, header_h(hwnd));
-        let h = if rolled { header_h(hwnd) } else { h };
-        unsafe { SetWindowPos(hwnd, null_mut(), 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) };
+        apply_rolled_state(hwnd, edit, w, h, rolled);
         crate::desktop::move_to_screen(hwnd, x, y);
+        save_all();
     }
     unsafe {
         KillTimer(hwnd, TIMER_PEEK_END);
@@ -1338,10 +1346,11 @@ fn anchor_widget(hwnd: HWND) {
 // Fuera de las capturas de pantalla
 // -----------------------------------------------------------------
 
-/// ¿Fuera de las capturas de pantalla (Teams, Discord, OBS…)? Las que
-/// tienen texto oculto siempre; todas, si así se eligió (`all`).
-fn is_private(nr: &crate::app::NoteRuntime, all: bool) -> bool {
-    all || editor::has_secrets(nr.edit as HWND)
+/// ¿Fuera de las capturas de pantalla (Teams, Discord, OBS…)? Todas si así
+/// se eligió (`all`); si no, ninguna, aunque tenga texto oculto (pedido del
+/// usuario: el ajuste manda; lo oculto sigue tapado con su cápsula).
+fn is_private(_nr: &crate::app::NoteRuntime, all: bool) -> bool {
+    all
 }
 
 /// Widget de escritorio de primer nivel, poseído por el escritorio
@@ -1665,6 +1674,7 @@ pub fn open_note(hwnd: HWND, at_cursor: bool) {
                 let mut a = app().lock().unwrap();
                 if let Some(nr) = a.notes.get_mut(&id) {
                     nr.peeking = true;
+                    nr.peek_unrolled = unroll.is_some();
                 }
             }
             // Poseída ya es de primer nivel: asomarse es solo pasar adelante
@@ -2987,6 +2997,11 @@ pub unsafe extern "system" fn note_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM,
             end_sizing(hwnd);
             0
         }
+        // Entrar por el borde (que es "no cliente") también cuenta: si no, el marco no aparecía hasta llegar adentro.
+        WM_NCMOUSEMOVE => {
+            on_hover(hwnd);
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
         WM_MOUSEMOVE => {
             on_hover(hwnd);
             let x = (lparam & 0xffff) as i16 as i32;
@@ -3005,8 +3020,9 @@ pub unsafe extern "system" fn note_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM,
         // Otro monitor, otra escala: la nota no cambia de tamaño (ver `note_dpi`).
         WM_DPICHANGED => 0,
         WM_EXITSIZEMOVE => {
-            crate::snap::finish_size(hwnd);
+            // Primero lo que quedó; después la pila puede llevarla a otro lugar (y guardarlo).
             on_move_end(hwnd, wparam == 1);
+            crate::snap::finish_size(hwnd);
             0
         }
         WM_MOVE => {

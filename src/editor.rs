@@ -13,6 +13,8 @@
 //!   de cada WM_PAINT se pintan encima (ver `paint_overlay`).
 //! - **Pegar sin arrastrar formato ajeno**: lo pegado conserva negrita &
 //!   cía., pero toma la letra, el tamaño y los colores de la nota.
+//! - **Imágenes**: Ctrl+V de una captura la pone en su propio párrafo
+//!   (ver `images.rs`); el renglón mide lo que la imagen y se pinta encima.
 //! - **Barra de desplazamiento fina**, del color de la nota: la de Windows
 //!   queda fuera de la vista (ver `hidden_bar_width`) y se dibuja otra
 //!   encima, que se ensancha con el mouse y se puede arrastrar.
@@ -54,6 +56,8 @@ const EM_SETBKGNDCOLOR: u32 = WM_USER + 67;
 const EM_SETCHARFORMAT: u32 = WM_USER + 68;
 const EM_SETEVENTMASK: u32 = WM_USER + 69;
 const EM_SETPARAFORMAT: u32 = WM_USER + 71;
+const EM_GETPARAFORMAT: u32 = WM_USER + 61;
+const EM_SCROLLCARET: u32 = 0x00B7;
 const EM_CANPASTE: u32 = WM_USER + 50;
 const EM_GETTEXTEX: u32 = WM_USER + 94;
 const EM_GETTEXTLENGTHEX: u32 = WM_USER + 95;
@@ -253,6 +257,12 @@ struct EditState {
     secrets: Vec<(usize, usize, bool)>,
     /// El tramo oculto recién copiado con clic derecho (destella un momento).
     copied: Option<usize>,
+    /// Las imágenes de la nota, por su carácter (ver `images.rs`). Quedan
+    /// aunque se borre su carácter: Ctrl+Z la devuelve.
+    images: HashMap<u16, crate::images::Image>,
+    /// Cómo se acomodaron los renglones de las imágenes la última vez:
+    /// ancho disponible y (inicio, imagen o 0) de cada párrafo.
+    image_layout: (i32, Vec<(usize, u16)>),
 }
 
 /// Temporizador del RichEdit para acomodar la presentación un momento
@@ -342,6 +352,8 @@ pub fn create(parent: HWND, hinstance: HINSTANCE, id: usize, rc: RECT) -> HWND {
                     locked: false,
                     secrets: Vec::new(),
                     copied: None,
+                    images: HashMap::new(),
+                    image_layout: (0, Vec::new()),
                 })
         });
         SetWindowSubclass(edit, Some(subclass_proc), 1, 0);
@@ -419,10 +431,10 @@ impl Drop for Quiet {
     fn drop(&mut self) {
         unsafe {
             send(self.edit, EM_EXSETSEL, 0, &self.sel as *const CharRange as isize);
-            send(self.edit, EM_SETSCROLLPOS, 0, &self.scroll as *const POINT as isize);
         }
         tom(self.edit, TOM_UNDO, TOM_RESUME);
         tom(self.edit, TOM_UNFREEZE, 0);
+        unsafe { send(self.edit, EM_SETSCROLLPOS, 0, &self.scroll as *const POINT as isize) };
         unsafe { send(self.edit, EM_SETEVENTMASK, 0, self.mask) };
     }
 }
@@ -627,7 +639,8 @@ pub fn load(edit: HWND, text: &str, fmt: &str) {
         base_format(edit, None, ink);
         let all = units(edit);
         base_paragraphs(edit, 0, all.len());
-        let st = richtext::styles_from_str(fmt, all.len() as u32);
+        let mut st = richtext::styles_from_str(fmt, all.len() as u32);
+        no_secret_images(&mut st, &all);
         for (k, spans) in st.spans.iter().enumerate() {
             for &(s, l) in spans {
                 select(edit, s as usize, (s + l) as usize);
@@ -639,11 +652,16 @@ pub fn load(edit: HWND, text: &str, fmt: &str) {
         let emojis = fix_faces(edit, &all);
         let secrets: Vec<(usize, usize, bool)> = st.spans[SECRET].iter().map(|&(s, l)| (s as usize, (s + l) as usize, false)).collect();
         hide_secrets(edit, &secrets, body);
+        let images: HashMap<u16, crate::images::Image> =
+            richtext::image_tokens(fmt).into_iter().filter_map(|(c, b64)| Some((c, crate::images::Image::from_b64(b64)?))).collect();
         with_state(edit, |s| {
             s.lists = list_signature(&all);
             s.emojis = emojis;
             s.secrets = secrets;
+            s.images = images;
+            s.image_layout = (0, Vec::new());
         });
+        layout_images(edit, &all);
     }
     // Cursor y vista al principio: una nota larga se ve desde arriba.
     select(edit, 0, 0);
@@ -701,6 +719,12 @@ pub fn refresh(edit: HWND) {
         unsafe { InvalidateRect(edit, null(), 0) };
     }
     let all = units(edit);
+    if has_images(edit, &all) {
+        writable(edit, || {
+            let _q = Quiet::new(edit);
+            layout_images(edit, &all);
+        });
+    }
     let sig = list_signature(&all);
     let emojis = richtext::emoji_clusters(&all);
     let (lists_changed, emojis_changed) = with_state(edit, |s| (s.lists != sig, s.emojis != emojis)).unwrap_or((false, false));
@@ -771,8 +795,149 @@ pub fn read(edit: HWND) -> (String, String) {
             st.clear_range(STRIKE, (a + plen) as u32, b as u32);
         }
     }
+    no_secret_images(&mut st, &all);
     st.normalize(n as u32);
-    (text, richtext::styles_to_string(&st))
+    (text, with_images(edit, &all, richtext::styles_to_string(&st)))
+}
+
+/// Una imagen no es texto oculto (pegada debajo de una clave heredaba su
+/// formato, y se le dibujaba la cápsula encima de un costado).
+fn no_secret_images(st: &mut Styles, all: &[u16]) {
+    for (i, &u) in all.iter().enumerate() {
+        if richtext::is_image(u) {
+            st.clear_range(SECRET, i as u32, i as u32 + 1);
+        }
+    }
+}
+
+/// Los estilos y las imágenes que siguen en el texto (en el orden en que aparecen).
+fn with_images(edit: HWND, all: &[u16], styles: String) -> String {
+    let mut seen: Vec<u16> = Vec::new();
+    for &u in all {
+        if richtext::is_image(u) && !seen.contains(&u) {
+            seen.push(u);
+        }
+    }
+    if seen.is_empty() {
+        return styles;
+    }
+    with_state(edit, |s| {
+        let list: Vec<(u16, &str)> = seen.iter().filter_map(|c| s.images.get(c).map(|i| (*c, i.b64.as_str()))).collect();
+        richtext::with_images(styles.clone(), &list)
+    })
+    .unwrap_or(styles)
+}
+
+/// ¿Hay (o había) imágenes en el texto? Si no, no hay nada que acomodar.
+fn has_images(edit: HWND, all: &[u16]) -> bool {
+    all.iter().any(|&u| richtext::is_image(u)) || with_state(edit, |s| !s.image_layout.1.is_empty()).unwrap_or(false)
+}
+
+/// El ancho en que entra una imagen, con el rectángulo del texto `rc`.
+fn image_room(rc: &RECT) -> i32 {
+    (rc.right - rc.left - 4).max(16)
+}
+
+/// Cada párrafo con una imagen mide lo que la imagen (interlineado exacto);
+/// los demás, normal (al apretar Enter el párrafo nuevo hereda el alto).
+/// Solo si cambió algo desde la última vez. Va dentro de un `Quiet`.
+fn layout_images(edit: HWND, all: &[u16]) {
+    if !has_images(edit, all) {
+        return;
+    }
+    let has_any = all.iter().any(|&u| richtext::is_image(u));
+    let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    unsafe { send(edit, EM_GETRECT, 0, &mut rc as *mut RECT as isize) };
+    let room = image_room(&rc);
+    let paras = richtext::paragraphs(all);
+    let sig: Vec<(usize, u16)> = if has_any {
+        paras.iter().map(|&(a, b)| (a, all[a..b].iter().copied().find(|&u| richtext::is_image(u)).unwrap_or(0))).collect()
+    } else {
+        Vec::new()
+    };
+    let key = (room, sig);
+    if with_state(edit, |s| s.image_layout == key).unwrap_or(true) {
+        return;
+    }
+    let heights: HashMap<u16, i32> = with_state(edit, |s| s.images.iter().map(|(c, i)| (*c, i.fit(room).1)).collect()).unwrap_or_default();
+    for (k, &(a, _)) in paras.iter().enumerate() {
+        let c = key.1.get(k).map_or(0, |p| p.1);
+        let want = match heights.get(&c) {
+            Some(&h) => (4u8, twips(edit, h)),
+            None => (0, 0),
+        };
+        let mut pf: ParaFormat = unsafe { std::mem::zeroed() };
+        pf.cb_size = std::mem::size_of::<ParaFormat>() as u32;
+        select(edit, a, a);
+        unsafe { send(edit, EM_GETPARAFORMAT, 0, &mut pf as *mut ParaFormat as isize) };
+        let now = (pf.line_spacing_rule, if pf.line_spacing_rule == 4 { pf.line_spacing } else { 0 });
+        if now != want {
+            pf.mask = PFM_LINESPACING;
+            (pf.line_spacing_rule, pf.line_spacing) = want;
+            unsafe { send(edit, EM_SETPARAFORMAT, 0, &pf as *const ParaFormat as isize) };
+        }
+    }
+    with_state(edit, |s| s.image_layout = key);
+}
+
+/// Pone la imagen (PNG) en lugar de la selección, en un párrafo propio, y
+/// deja el cursor en el párrafo de abajo.
+fn insert_image(edit: HWND, png: &[u8]) {
+    let Some(img) = crate::images::Image::from_png(png) else { return };
+    let all = units(edit);
+    let used: Vec<u16> = with_state(edit, |s| s.images.keys().copied().collect()).unwrap_or_default();
+    let Some(c) = (richtext::IMAGE_BASE..=richtext::IMAGE_END).find(|c| !used.contains(c) && !all.contains(c)) else { return };
+    with_state(edit, |s| s.images.insert(c, img));
+    let (s, e) = selection(edit);
+    let cr = '\r' as u16;
+    let lead = s > 0 && all.get(s - 1) != Some(&cr);
+    let trail = all.get(e) != Some(&cr);
+    let mut ins = String::new();
+    if lead {
+        ins.push('\r');
+    }
+    ins.push(char::from_u32(c as u32).unwrap_or('?'));
+    if trail {
+        ins.push('\r');
+    }
+    replace(edit, s, e, &ins, true);
+    let end = s + ins.encode_utf16().count();
+    let (ink, _) = colors(edit);
+    {
+        let _q = Quiet::new(edit);
+        base_format(edit, Some((s, end)), ink);
+        // Sin lo oculto que pudo heredar del renglón de arriba.
+        set_format(edit, SCF_SELECTION, &CharFormat::new(CFM_ANIMATION, 0));
+        base_paragraphs(edit, s, end);
+        layout_images(edit, &units(edit));
+    }
+    let secrets = scan_secrets(edit);
+    with_state(edit, |st| st.secrets = secrets);
+    let caret = (if trail { end } else { end + 1 }).min(units(edit).len());
+    select(edit, caret, caret);
+    unsafe { send(edit, EM_SCROLLCARET, 0, 0) };
+    changed(edit);
+}
+
+/// Escribir pegado a una imagen: la letra va a un párrafo propio (si no,
+/// quedaba en el renglón alto, debajo de la imagen).
+fn make_room_by_image(edit: HWND) {
+    let (s, e) = selection(edit);
+    if s != e {
+        return;
+    }
+    let all = units(edit);
+    let after = s > 0 && all.get(s - 1).is_some_and(|&u| richtext::is_image(u));
+    let before = all.get(s).is_some_and(|&u| richtext::is_image(u));
+    if !after && !before {
+        return;
+    }
+    replace(edit, s, s, "\r", true);
+    if before {
+        select(edit, s, s);
+    }
+    let _q = Quiet::new(edit);
+    layout_images(edit, &units(edit));
 }
 
 /// Recorre [0, n) por tramos de formato parejo según `key` (`None`: no
@@ -921,10 +1086,6 @@ pub fn hide_all_secrets(edit: HWND) {
     }
 }
 
-/// ¿Hay texto oculto? (Para sacar la nota de las capturas de pantalla.)
-pub fn has_secrets(edit: HWND) -> bool {
-    with_state(edit, |s| !s.secrets.is_empty()).unwrap_or(false)
-}
 
 /// Los renglones que ocupa [a, b) en pantalla (coordenadas del RichEdit).
 fn secret_rects(edit: HWND, text: &[u16], a: usize, b: usize) -> Vec<RECT> {
@@ -987,8 +1148,6 @@ pub fn toggle_style(edit: HWND, style: usize) {
         recolor(edit, &secrets);
         with_state(edit, |s| s.secrets = secrets);
         unsafe { InvalidateRect(edit, null(), 0) };
-        // Con texto oculto, la nota sale de las capturas de pantalla.
-        crate::note::update_privacy(unsafe { GetParent(edit) });
     }
     changed(edit);
 }
@@ -1183,6 +1342,13 @@ fn on_space(edit: HWND) -> bool {
 /// Pegar: lo pegado toma la letra, el tamaño y los colores de la nota
 /// (se quedan la negrita y compañía).
 fn on_paste(edit: HWND) {
+    // Una imagen sola (una captura): va como imagen.
+    if crate::images::clipboard_has_image() {
+        if let Some(png) = crate::images::clipboard_png() {
+            insert_image(edit, &png);
+        }
+        return;
+    }
     let before = units(edit).len();
     let (s, e) = selection(edit);
     unsafe { DefSubclassProc(edit, WM_PASTE, 0, 0) };
@@ -1199,7 +1365,11 @@ fn on_paste(edit: HWND) {
         let all = units(edit);
         let paras = richtext::paragraphs(&all);
         decorate(edit, &all, &paras, ink, body);
-        with_state(edit, |st| st.lists = list_signature(&all));
+        with_state(edit, |st| {
+            st.lists = list_signature(&all);
+            st.image_layout = (0, Vec::new());
+        });
+        layout_images(edit, &all);
     }
     changed(edit);
 }
@@ -1264,7 +1434,7 @@ fn show_menu(edit: HWND, screen: Option<POINT>) {
     let (a, b) = paragraph_at(&text, s);
     let kind = richtext::list_of(&text[a..b]).0;
     let has_sel = s != e;
-    let can_paste = unsafe { send(edit, EM_CANPASTE, 0, 0) } != 0;
+    let can_paste = unsafe { send(edit, EM_CANPASTE, 0, 0) } != 0 || crate::images::clipboard_has_image();
     let tool = |id: u32, glyph: Glyph, active: bool| Tool { id, glyph, active };
     let entries = vec![
         Entry::Tools(vec![
@@ -1607,7 +1777,8 @@ unsafe fn draw_marks(edit: HWND, hdc: HDC) {
     let clusters = richtext::emoji_clusters(&text);
     let todos = richtext::checkboxes(&text);
     let secrets = with_state(edit, |s| s.secrets.clone()).unwrap_or_default();
-    if clusters.is_empty() && todos.is_empty() && secrets.is_empty() {
+    let pics: Vec<(usize, u16)> = text.iter().copied().enumerate().filter(|&(_, u)| richtext::is_image(u)).collect();
+    if clusters.is_empty() && todos.is_empty() && secrets.is_empty() && pics.is_empty() {
         return;
     }
     let (ink, body) = colors(edit);
@@ -1663,6 +1834,39 @@ unsafe fn draw_marks(edit: HWND, hdc: HDC) {
             crate::d2d::Bg::Solid(body)
         };
         crate::d2d::draw_emoji(hdc, cell, clip, &text[a..b], em as u32, bg);
+    }
+
+    // Las imágenes, sobre su renglón (que mide lo que ellas); elegidas, con el color de la selección encima.
+    if !pics.is_empty() {
+        let room = image_room(&clip);
+        let mut g: *mut GpGraphics = null_mut();
+        if GdipCreateFromHDC(hdc, &mut g) == Ok && !g.is_null() {
+            for (cp, c) in pics {
+                let p0 = pos(edit, cp);
+                let Some((w, h, bmp)) = with_state(edit, |st| {
+                    let img = st.images.get_mut(&c)?;
+                    let (w, h) = img.fit(room);
+                    Some((w, h, img.at(w, h)))
+                })
+                .flatten() else {
+                    continue;
+                };
+                if p0.y >= clip.bottom || p0.y + h <= clip.top {
+                    continue;
+                }
+                GdipDrawImageRectI(g, bmp as *mut GpImage, p0.x, p0.y, w, h);
+                if selected_visible && cp >= s && cp < e {
+                    let hl = GetSysColor(COLOR_HIGHLIGHT);
+                    let argb = 0x6600_0000 | ((hl & 0xff) << 16) | (hl & 0xff00) | ((hl >> 16) & 0xff);
+                    let mut brush: *mut GpSolidFill = null_mut();
+                    if GdipCreateSolidFill(argb, &mut brush) == Ok {
+                        GdipFillRectangleI(g, brush as *mut GpBrush, p0.x, p0.y, w, h);
+                        GdipDeleteBrush(brush as *mut GpBrush);
+                    }
+                }
+            }
+            GdipDeleteGraphics(g);
+        }
     }
 
     let copied = with_state(edit, |s| s.copied).flatten();
@@ -1875,6 +2079,9 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
             if c == ' ' as u16 && !locked(edit) && on_space(edit) {
                 paint_overlay(edit);
                 return 0;
+            }
+            if c >= 0x20 && !locked(edit) {
+                make_room_by_image(edit);
             }
             // Al escribir, el RichEdit redibuja la línea en el acto (sin
             // WM_PAINT), con el ☐ de la fuente y los emojis en gris: sin
@@ -2171,6 +2378,14 @@ unsafe fn paint_background(edit: HWND) {
 pub fn set_padding(edit: HWND, w: i32, h: i32, pad_x: i32, pad_y: i32) {
     let mut rc = RECT { left: pad_x, top: pad_y, right: (w - pad_x).max(pad_x), bottom: (h - pad_y).max(pad_y) };
     unsafe { send(edit, EM_SETRECT, 0, &mut rc as *mut RECT as isize) };
+    // Otro ancho: las imágenes se achican o se agrandan con la nota.
+    let all = units(edit);
+    if has_images(edit, &all) {
+        writable(edit, || {
+            let _q = Quiet::new(edit);
+            layout_images(edit, &all);
+        });
+    }
 }
 
 #[cfg(test)]
@@ -2219,6 +2434,152 @@ mod tests {
             assert_eq!(text_x, 30);
             assert_eq!(first_x, Some(text_x as usize), "el texto no cae donde dice el RichEdit");
             assert!(selected > 0, "no dibujó la selección");
+        }
+    }
+
+    /// Una nota con una imagen: se guarda igual que se cargó, su renglón
+    /// mide lo que la imagen y la imagen se pinta ahí.
+    #[test]
+    #[ignore]
+    fn imagen_en_la_nota() {
+        unsafe {
+            let png = crate::images::test_png(300, 100, 0xffff_0000);
+            let fmt = format!("p57344:{}", crate::crypto::b64url(&png));
+            crate::note::load_richedit_library();
+            let cls = wide("STATIC");
+            let host = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE, cls.as_ptr(), null(), WS_POPUP, 0, 0, 400, 300, null_mut(), null_mut(), null_mut(), null());
+            SetLayeredWindowAttributes(host, 0, 1, LWA_ALPHA);
+            let edit = create(host, null_mut(), 1, RECT { left: 0, top: 0, right: 400, bottom: 300 });
+            set_padding(edit, 400, 300, 20, 0);
+            load(edit, "arriba\n\u{E000}\nabajo", &fmt);
+            ShowWindow(host, SW_SHOWNOACTIVATE);
+            let (text, f2) = read(edit);
+            let (top, next) = (pos(edit, 7), pos(edit, 9).y);
+            let mut client = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            GetClientRect(edit, &mut client);
+            let c = crate::glass::Canvas::new(client.right, client.bottom).unwrap();
+            c.fill(client, 0x00ff_ffff, 255);
+            // Como `paint_buffered`: el texto del RichEdit y encima las marcas.
+            let services = with_state(edit, |s| s.services).unwrap();
+            type TxDraw = unsafe extern "system" fn(*mut c_void, u32, i32, *mut c_void, *mut c_void, HDC, HDC, *const RECT, *const RECT, *mut RECT, *mut c_void, u32, i32) -> i32;
+            let txdraw: TxDraw = method(services, 4);
+            let mut cl = client;
+            txdraw(services, 1, 0, null_mut(), null_mut(), c.dc, null_mut(), &client, null(), &mut cl, null_mut(), 0, 0);
+            draw_marks(edit, c.dc);
+            GdiFlush();
+            let mut ds: DIBSECTION = std::mem::zeroed();
+            GetObjectW(GetCurrentObject(c.dc, OBJ_BITMAP as u32), std::mem::size_of::<DIBSECTION>() as i32, &mut ds as *mut DIBSECTION as *mut c_void);
+            let bits = std::slice::from_raw_parts(ds.dsBm.bmBits as *const u32, (client.right * client.bottom) as usize);
+            let at = |x: i32, y: i32| bits[(y * client.right + x) as usize] & 0xffffff;
+            let (inside, outside) = (at(top.x + 150, top.y + 50), at(top.x + 320, top.y + 50));
+            // Nada del RichEdit a la vista en el renglón de la imagen, fuera de ella.
+            let mut stray = Vec::new();
+            for y in top.y..top.y + 100 {
+                for x in 0..client.right - 30 {
+                    let in_img = x >= top.x && x < top.x + 300;
+                    if !in_img && at(x, y) != 0xffffff {
+                        stray.push((x, y));
+                    }
+                }
+            }
+            DestroyWindow(host);
+            assert_eq!(top.x, 20, "la imagen no arranca en el margen");
+            assert!(stray.is_empty(), "algo dibujado al lado de la imagen: {} píxeles, p. ej. {:?}", stray.len(), &stray[..stray.len().min(5)]);
+            assert_eq!((text.as_str(), f2.as_str()), ("arriba\n\u{E000}\nabajo", fmt.as_str()));
+            assert_eq!(next - top.y, 100, "el renglón de la imagen no mide lo que ella");
+            assert_eq!((inside, outside), (0xff0000, 0xffffff), "la imagen no se pintó en su renglón");
+        }
+    }
+
+    /// Una imagen pegada en medio de texto oculto no queda oculta (se le
+    /// dibujaba la cápsula al costado), ni la que ya quedó así guardada.
+    #[test]
+    #[ignore]
+    fn imagen_nunca_oculta() {
+        unsafe {
+            let png = crate::images::test_png(200, 60, 0xff00_00ff);
+            crate::note::load_richedit_library();
+            let cls = wide("STATIC");
+            let host = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE, cls.as_ptr(), null(), WS_POPUP, 0, 0, 400, 300, null_mut(), null_mut(), null_mut(), null());
+            let edit = create(host, null_mut(), 1, RECT { left: 0, top: 0, right: 400, bottom: 300 });
+            set_padding(edit, 400, 300, 20, 0);
+            load(edit, "ab", "h0+2");
+            select(edit, 1, 1);
+            insert_image(edit, &png);
+            let (_, fmt) = read(edit);
+            let secrets = with_state(edit, |s| s.secrets.clone()).unwrap();
+            // Una guardada con la imagen oculta: al cargarla deja de estarlo.
+            let saved = format!("h0+3 p57344:{}", crate::crypto::b64url(&png));
+            load(edit, "a\n\u{E000}", &saved);
+            let (_, again) = read(edit);
+            DestroyWindow(host);
+            assert!(fmt.starts_with("h0+1,4+1 p57344:"), "{}", &fmt[..fmt.len().min(30)]);
+            assert_eq!(secrets.iter().map(|s| (s.0, s.1)).collect::<Vec<_>>(), vec![(0, 1), (4, 5)]);
+            assert!(again.starts_with("h0+2 p57344:"), "{}", &again[..again.len().min(30)]);
+        }
+    }
+
+    /// Mostrar u ocultar un tramo no mueve la vista.
+    #[test]
+    #[ignore]
+    fn mostrar_oculto_no_mueve_la_vista() {
+        unsafe {
+            crate::note::load_richedit_library();
+            let cls = wide("STATIC");
+            let host = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE, cls.as_ptr(), null(), WS_POPUP, 0, 0, 400, 300, null_mut(), null_mut(), null_mut(), null());
+            let edit = create(host, null_mut(), 1, RECT { left: 0, top: 0, right: 400, bottom: 300 });
+            set_padding(edit, 400, 300, 20, 0);
+            let text: String = (0..80).map(|i| format!("renglón {i}\n")).collect();
+            let at = text.find("renglón 40").unwrap();
+            let at = text[..at].encode_utf16().count();
+            load(edit, &text, &format!("h{at}+10"));
+            let scroll = |e| {
+                let mut p = POINT { x: 0, y: 0 };
+                send(e, EM_GETSCROLLPOS, 0, &mut p as *mut POINT as isize);
+                p.y
+            };
+            send(edit, EM_SETSCROLLPOS, 0, &POINT { x: 0, y: 500 } as *const POINT as isize);
+            let before = scroll(edit);
+            toggle_reveal(edit, 0);
+            let shown = scroll(edit);
+            toggle_reveal(edit, 0);
+            let hidden = scroll(edit);
+            DestroyWindow(host);
+            assert!(before > 0);
+            assert_eq!((shown, hidden), (before, before));
+        }
+    }
+
+    /// Pegar una imagen en medio de un renglón la pone en un párrafo propio,
+    /// y escribir pegado a ella no la ensucia.
+    #[test]
+    #[ignore]
+    fn pegar_imagen_en_medio() {
+        unsafe {
+            let png = crate::images::test_png(200, 60, 0xff00_ff00);
+            crate::note::load_richedit_library();
+            let cls = wide("STATIC");
+            let host = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE, cls.as_ptr(), null(), WS_POPUP, 0, 0, 400, 300, null_mut(), null_mut(), null_mut(), null());
+            let edit = create(host, null_mut(), 1, RECT { left: 0, top: 0, right: 400, bottom: 300 });
+            set_padding(edit, 400, 300, 20, 0);
+            load(edit, "ab", "");
+            select(edit, 1, 1);
+            insert_image(edit, &png);
+            let after_insert = (read(edit).0, selection(edit));
+            let tall = pos(edit, 4).y - pos(edit, 2).y;
+            // El cursor justo después de la imagen: lo escrito va abajo.
+            select(edit, 3, 3);
+            make_room_by_image(edit);
+            send(edit, WM_CHAR, 'x' as usize, 0);
+            refresh(edit);
+            let typed = read(edit).0;
+            let x_line = pos(edit, 5).y;
+            let line = pos(edit, 6).y - x_line;
+            DestroyWindow(host);
+            assert_eq!(after_insert, ("a\n\u{E000}\nb".to_string(), (4, 4)));
+            assert_eq!(tall, 60);
+            assert_eq!(typed, "a\n\u{E000}\nx\nb");
+            assert!(line > 0 && line < 40, "el renglón nuevo heredó el alto de la imagen ({line})");
         }
     }
 }

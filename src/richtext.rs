@@ -209,10 +209,12 @@ pub fn styles_from_str(s: &str, text_len: u32) -> Styles {
 /// deja ver el largo). Para todo lo que muestra o busca texto fuera de la
 /// nota: título, vistas previas, búsqueda.
 pub fn visible_text(text: &str, fmt: &str) -> String {
-    let units: Vec<u16> = text.encode_utf16().collect();
+    // Las imágenes no son texto: quedan afuera (como 0, que se saca al
+    // final: lo oculto cuenta posiciones con ellas adentro).
+    let units: Vec<u16> = text.encode_utf16().map(|u| if is_image(u) { 0 } else { u }).collect();
     let secret = &styles_from_str(fmt, units.len() as u32).spans[SECRET];
     if secret.is_empty() {
-        return text.to_string();
+        return String::from_utf16_lossy(&units.into_iter().filter(|&u| u != 0).collect::<Vec<u16>>());
     }
     let mut out = Vec::with_capacity(units.len());
     let mut at = 0usize;
@@ -222,7 +224,45 @@ pub fn visible_text(text: &str, fmt: &str) -> String {
         at = (s + l) as usize;
     }
     out.extend_from_slice(&units[at..]);
+    out.retain(|&u| u != 0);
     String::from_utf16_lossy(&out)
+}
+
+// -----------------------------------------------------------------
+// Imágenes
+// -----------------------------------------------------------------
+
+/// Cada imagen de una nota es un carácter de uso privado (uno distinto por
+/// imagen) en el texto, y su PNG va en el formato como `p<carácter>:<base64>`
+/// (ver `images.rs`). Una versión vieja ignora esa parte del formato.
+pub const IMAGE_BASE: u16 = 0xE000;
+pub const IMAGE_END: u16 = 0xF8FF;
+
+pub fn is_image(u: u16) -> bool {
+    (IMAGE_BASE..=IMAGE_END).contains(&u)
+}
+
+/// Las imágenes guardadas en el formato: (carácter, PNG en base64).
+pub fn image_tokens(fmt: &str) -> Vec<(u16, &str)> {
+    fmt.split_whitespace()
+        .filter_map(|t| {
+            let (c, b64) = t.strip_prefix('p')?.split_once(':')?;
+            let c: u16 = c.parse().ok()?;
+            (is_image(c) && !b64.is_empty()).then_some((c, b64))
+        })
+        .collect()
+}
+
+/// El formato con las imágenes agregadas.
+pub fn with_images(styles: String, images: &[(u16, &str)]) -> String {
+    let mut out = styles;
+    for (c, b64) in images {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&format!("p{c}:{b64}"));
+    }
+    out
 }
 
 pub fn utf16_len(s: &str) -> u32 {
@@ -356,6 +396,19 @@ mod tests {
         assert_eq!(visible_text("sin nada", "b0+3"), "sin nada");
         let st = styles_from_str("h3+2 b0+1", 10);
         assert_eq!(styles_to_string(&st), "b0+1 h3+2");
+    }
+
+    #[test]
+    fn imagenes_en_el_formato() {
+        let fmt = with_images("b0+1".into(), &[(0xE000, "iVBO-_"), (0xE001, "AAAA")]);
+        assert_eq!(fmt, "b0+1 p57344:iVBO-_ p57345:AAAA");
+        assert_eq!(image_tokens(&fmt), vec![(0xE000, "iVBO-_"), (0xE001, "AAAA")]);
+        // Los estilos no se enteran, y lo que no es una imagen se ignora.
+        assert_eq!(styles_to_string(&styles_from_str(&fmt, 5)), "b0+1");
+        assert!(image_tokens("p65:AA p57344: pxx:AA").is_empty());
+        // Ni en el título ni en las vistas previas (y lo oculto sigue en su lugar).
+        assert_eq!(visible_text("foto:\n\u{E000}\nfin", "p57344:AA"), "foto:\n\nfin");
+        assert_eq!(visible_text("\u{E000}\nclave abc", "h8+3 p57344:AA"), "\nclave ••••");
     }
 
     #[test]

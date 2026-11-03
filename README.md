@@ -57,7 +57,8 @@ Ya funciona:
   bloquear, "⋯") solo con el mouse encima o mientras se escribe, con
   ayudas al posar el mouse. Arrastrar la barra mueve la nota; en Manual, un
   clic en la barra la enrolla o la desenrolla (también `Ctrl+R`); doble
-  clic la renombra.
+  clic la renombra. En Auto no se abre mientras se tiene el botón del
+  mouse apretado (seleccionando texto en otra nota): se abre al soltarlo.
 - **Menú "⋯" propio** (`flyout.rs`, al estilo de Windows 11): los seis
   colores como muestras — el único lugar donde se elige el color —,
   siempre encima, enrollado automático, cambiar nombre, duplicar, todas
@@ -69,6 +70,13 @@ Ya funciona:
   `richtext.rs`), en una forma canónica: no RTF, que cada versión de
   Windows escribe distinto y haría que dos compus se pasaran la misma
   nota "arreglándola" para siempre.
+- **Imágenes**: `Ctrl+V` de una captura (o de una imagen copiada sin
+  texto) la pone en su propio párrafo, ajustada al ancho de la nota; se
+  achica y se agranda con la nota. Se guarda como PNG (hasta 1600 px de
+  ancho) dentro del formato de la nota, así que va cifrada en
+  `notes.json` y viaja a Drive con el texto. Se borra como una letra (y
+  `Ctrl+Z` la devuelve). Una versión vieja de Simpcky no la muestra, y si
+  guarda esa nota la pierde.
 - **Listas de tareas y viñetas**: `[] ` o `- ` al comienzo de una línea
   (o el clic derecho, o `Ctrl+Shift+C` / `Ctrl+Shift+L`). La marca vive
   en el texto (`☐ `, `☑ `, `• `), así que una versión vieja o un copiar y
@@ -111,7 +119,8 @@ Ya funciona:
   "Nota"). **Doble clic en el título**, `F2`, o "⋯" → Cambiar nombre
   abre un cuadro ahí mismo con el nombre seleccionado — como renombrar
   un archivo en el Explorador. Enter confirma, Esc cancela; dejarlo
-  vacío vuelve al nombre automático.
+  vacío vuelve al nombre automático. El cuadro mide lo que el nombre (y
+  crece al escribir): el resto de la barra sigue enrollando con un clic.
 - **Redimensionable** desde cualquier borde o esquina (vía
   `WM_NCHITTEST`, sin necesidad de `WS_THICKFRAME`), con un tamaño
   mínimo razonable. Deshabilitado mientras está enrollada. Windows solo
@@ -121,7 +130,8 @@ Ya funciona:
   borde lo sigue hasta soltar. Los bordes agarran 8 px y las esquinas
   18 px de cada lado (el texto le deja pasar el mouse a la nota ahí),
   y con el mouse encima aparece una agarradera de tres puntitos abajo a
-  la derecha.
+  la derecha. El marco del borde (`edges.rs`) aparece también al
+  acercarse desde el escritorio o al entrar por el borde.
 - **La que se desenrolla pasa adelante**: con enrollado automático, al
   desenrollarse la nota sube arriba de las otras notas (sin pasar
   adelante de ninguna aplicación). En modo vidrio las notas del
@@ -156,8 +166,12 @@ Ya funciona:
   cada alto de barra + 10 px: no se guardan, se reconocen por la
   posición (también las armadas a mano). Cada nota más angosta que la
   pila va pegada al borde izquierdo o al derecho, según de qué lado se la
-  suelte (la línea azul lo muestra). Soltar una nota sobre una pila la
-  suma enrollada y en modo Auto; sacarla la abre y la pasa a Manual;
+  suelte (la línea azul lo muestra). En **mosaico**: si queda del otro
+  lado que la de arriba y entran las dos en el ancho de la pila, van en
+  la misma fila. Soltar una nota sobre una pila la suma enrollada y en
+  modo Auto (o Manual, si en Configuración se apagó "Abrir las notas de
+  una pila al pasar el mouse": se abren con un clic); sacarla la abre y
+  la pasa a Manual;
   al ocultar o borrar una, las de abajo suben. `Ctrl` + arrastrar mueve
   la pila entera de celda en celda (si cae sobre otra pila, se juntan, y
   mientras se la lleva se ve cómo van a quedar), y con `Ctrl` apretado sus
@@ -189,11 +203,12 @@ Ya funciona:
   previas ni la búsqueda (`richtext::visible_text`): ahí sale `••••`. En el
   RichEdit va marcado en `bAnimation` (que guarda y hereda al escribir pero
   no dibuja), con la tinta del color del fondo mientras está tapado.
-- **Fuera de las capturas de pantalla**: las notas con texto oculto no salen
-  al compartir pantalla (Teams, Zoom, Discord, Meet, OBS, Recortes:
-  `WDA_EXCLUDEFROMCAPTURE`); quien mira ve lo que hay detrás. Con
-  Configuración → "Ocultar las notas al compartir pantalla", ninguna nota
-  sale (ni el selector ni "Todas las notas"). Windows solo excluye ventanas
+- **Fuera de las capturas de pantalla**: con Configuración → "Ocultar las
+  notas al compartir pantalla", ninguna nota sale al compartir pantalla
+  (Teams, Zoom, Discord, Meet, OBS, Recortes: `WDA_EXCLUDEFROMCAPTURE`),
+  ni el selector ni "Todas las notas"; quien mira ve lo que hay detrás.
+  Apagado, salen todas, también las que tienen texto oculto (que sale
+  tapado con su cápsula). Windows solo excluye ventanas
   de primer nivel, y una nota anclada es hija del escritorio: por eso las
   privadas son, como en vidrio, ventanas poseídas por el escritorio
   (`desktop::own`). No cubre el escritorio remoto, la "captura de juego"

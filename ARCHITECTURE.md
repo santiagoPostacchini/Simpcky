@@ -1,12 +1,25 @@
 # Decisiones de arquitectura
 
+## Imágenes en las notas (2026-11-03)
+
+**Contexto.** Pedido: pegar capturas en una nota, dentro del texto. El texto se guarda como texto plano más un formato canónico (no RTF), y eso no se quería perder.
+
+**Decisión.**
+- Cada imagen es un carácter de uso privado (U+E000…, uno distinto por imagen) en su propio párrafo; el PNG va en el mismo `fmt` como `p<carácter>:<base64>`. Así viaja con el texto (guardar, sincronizar, duplicar) sin tocar `NoteData` ni el documento de Drive, y una versión vieja ignora esa parte (`styles_from_str` saltea lo que no entiende).
+- El RichEdit no la dibuja: a su párrafo se le da interlineado exacto con el alto de la imagen (`layout_images`) y `draw_marks` la pinta encima, en el mismo lienzo que el texto, como los emojis y las cápsulas. Se rehace al cambiar el ancho de la nota y cuando cambian los párrafos (un Enter hereda el alto). Escribir pegado a una imagen abre un párrafo propio.
+- No se usa `ITextRange2::InsertImage` ni objetos OLE: no hay cómo leer la imagen de vuelta sin RTF, y no se sabe cuál es cuál después de editar.
+
+**Límites conocidos.** Copiar una imagen a otra aplicación copia solo su carácter (sin imagen); entre notas, también. Una nota con imágenes hace más pesado `notes.json` y la sincronización (una captura de 1600 px: 100–500 KB). Una versión vieja que guarde la nota la pierde. En modo vidrio la imagen puede verse con el alfa del fondo (no se probó).
+
+**Cómo verificar.** `cargo test -- --ignored imagen pegar_imagen` (RichEdit real: lo guardado vuelve igual, el renglón mide lo que la imagen, se pinta ahí, y escribir al lado no la ensucia).
+
 ## Texto oculto y notas fuera de las capturas (2026-10-30)
 
 **Contexto.** Hay quien guarda claves en las notas: que no se lean por encima del hombro ni al compartir pantalla (Teams, Discord, OBS…), sin depender de la aplicación que captura.
 
 **Decisión.**
 - **Texto oculto** como un estilo más (`h` en `fmt`, `richtext::SECRET`). En el RichEdit se marca con `bAnimation` (el RichEdit lo guarda y lo hereda al escribir como la negrita, pero no lo dibuja; probado). Tapado, la tinta es del color del fondo y encima se dibuja la cápsula, en el mismo lienzo que el texto: lo real no llega a la pantalla aunque la cápsula se atrase. Mostrarlo no se guarda ni se puede deshacer, y se vuelve a tapar al enrollar o cerrar la nota.
-- **Fuera de las capturas** con `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`. Windows lo niega a las ventanas hijas (error 87, probado), y una nota anclada es hija del escritorio. Las privadas (con texto oculto, o todas si se eligió en Configuración) usan lo que ya existía para el modo vidrio: ventana de primer nivel poseída por el escritorio (`desktop::own`), que queda detrás de las aplicaciones y se ve con "Mostrar escritorio". `note::keep_on_desktop` decide anclada o poseída para cada nota.
+- **Fuera de las capturas** con `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`. Windows lo niega a las ventanas hijas (error 87, probado), y una nota anclada es hija del escritorio. Las privadas (todas, si se eligió en Configuración; antes también las que tenían texto oculto, pero el usuario pidió que mande solo el ajuste: 2026-11-03) usan lo que ya existía para el modo vidrio: ventana de primer nivel poseída por el escritorio (`desktop::own`), que queda detrás de las aplicaciones y se ve con "Mostrar escritorio". `note::keep_on_desktop` decide anclada o poseída para cada nota.
 - **Escala del texto.** El RichEdit dibuja al ppp del sistema, no al de su ventana, y solo se acomoda con el aviso de cambio de ppp, que llega al cambiar de monitor pero no al anclarse, y que además agranda los márgenes (medido). Una nota de primer nivel en un monitor con otra escala tenía encabezado a 150 % y texto a 100 %. Ahora la nota entera se dibuja al ppp del sistema en cualquier monitor (`note::note_dpi`, como siempre hicieron las ancladas), no cambia de tamaño con `WM_DPICHANGED` y el RichEdit no recibe esos avisos: una nota mide y se ve igual en los dos monitores, y la cuadrícula usa la misma escala (pedido del usuario: "mantener el tamaño entre monitores"). `desktop::detach` conserva el tamaño: el aviso de ppp en el medio de `SetParent` la agrandaba cada vez.
 
 **Límites conocidos.** No es un mecanismo de seguridad (Microsoft lo aclara): no cubre el escritorio remoto, la "captura de juego" de OBS ni una foto. El texto oculto viaja tal cual dentro de las notas, que ahora van cifradas (ver "Cifrado local y de la copia de Drive"). Todas las notas, ancladas o no, se dibujan al ppp del sistema en cualquier monitor (decisión de arriba); falta probar a mano el caso viejo de una nota creada enrollada en un monitor con otra escala (franja oscura bajo la barra).
@@ -24,7 +37,7 @@
 
 **Medido** (monitor de 400 Hz, `demos/bench/smooth.py` de la rama `demo/raven`, 3 corridas): enrollar 27–30 pasos (antes 10), salto máximo 20–33 px (antes 80), 0 tirones (antes 1,7 por animación); encaje en celda 18 pasos (antes 10); arrastre igual (1,6 ms detrás del cursor). No llega a los 56 pasos de las demos: con GDI cada paso cuesta ~5 ms entre redibujar la nota y el escritorio de abajo. CPU al enrollar: 300 ms en vez de 130 (más cuadros).
 
-**Límites conocidos.** El marco aparece después de que el mouse pasa por la nota: llegando desde afuera, el borde se agarra recién al entrar en ella (la franja de 8 px de adentro sigue estando). Ganar más pasos en las transiciones pide dibujar distinto (ver "Alternativa descartada por ahora" del parpadeo).
+**Límites conocidos.** El marco aparece al entrar a la nota (también por su borde, `WM_NCMOUSEMOVE`) o al acercarse desde el escritorio: un vistazo cada 40 ms al mouse (`edges::poll`, solo si se movió). Desde arriba de una aplicación (una nota "siempre encima") la franja de afuera recién se agarra después de entrar. Ganar más pasos en las transiciones pide dibujar distinto (ver "Alternativa descartada por ahora" del parpadeo).
 
 **Cómo verificar.** Medir: `python smooth.py --exe target/release/simpcky.exe --label X --runs 3` (de `demos/bench` en `demo/raven`). Borde, con el mouse real (mueven el cursor: no tocar nada): `python examples/mapa_cursores.py target/release/simpcky.exe` (qué cursor hay en cada punto alrededor de una nota) y `python examples/borde_prueba.py target/release/simpcky.exe capturas` (cursor a 3 y 5 px afuera del borde, capturas del resaltado y arrastre desde afuera: la nota se agranda 60 px).
 

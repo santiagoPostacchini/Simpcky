@@ -1,0 +1,28 @@
+esperar 1500
+foto inicio
+ctrl 1
+estirar Arriba -300 0 500
+ctrl 0
+esperar 700
+foto arriba_achicada
+sobre Pass 100 20
+esperar 1000
+foto pass_abierta
+estirar Pass 0 137 500 ctrl
+ctrl 0
+foto pass_estirada
+ir 2300 900 200
+esperar 1200
+foto pass_enrollada
+tomar Remoto 100 20
+ir 2600 700 500
+soltar
+esperar 700
+foto remoto_afuera
+tomar Remoto 100 20
+ir 3700 100 600
+esperar 200
+soltar
+esperar 700
+foto remoto_adentro
+esperar 300

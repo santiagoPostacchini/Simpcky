@@ -12,7 +12,7 @@ use std::sync::Mutex;
 
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
-use windows_sys::Win32::UI::Controls::EM_SETSEL;
+use windows_sys::Win32::UI::Controls::{EM_GETSEL, EM_SETSEL};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{SetFocus, VK_ESCAPE, VK_RETURN};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -35,6 +35,8 @@ struct Active {
     brush: isize,
     ink: u32,
     header: u32,
+    /// Lo más ancho que puede ser el cuadro (hasta los botones).
+    max_w: i32,
 }
 
 static ACTIVE: Mutex<Option<Active>> = Mutex::new(None);
@@ -96,7 +98,9 @@ pub fn begin(note: HWND) {
             brush: brush as isize,
             ink,
             header,
+            max_w: rc.right - rc.left,
         });
+        fit(edit);
 
         SetFocus(edit);
         SendMessageW(edit, EM_SETSEL, 0, -1);
@@ -161,6 +165,34 @@ pub fn ctl_color(hdc: HDC, edit: HWND) -> Option<LRESULT> {
     Some(a.brush as LRESULT)
 }
 
+/// El cuadro mide lo que su texto (con un mínimo), no toda la barra: así
+/// el resto de la barra se sigue pudiendo tocar para enrollar la nota.
+unsafe fn fit(edit: HWND) {
+    let Some(max_w) = ACTIVE.lock().unwrap().as_ref().filter(|a| a.edit == edit as isize).map(|a| a.max_w) else { return };
+    let len = GetWindowTextLengthW(edit).max(0) as usize;
+    let mut buf = vec![0u16; len + 1];
+    GetWindowTextW(edit, buf.as_mut_ptr(), buf.len() as i32);
+    let dc = GetDC(edit);
+    let old = SelectObject(dc, SendMessageW(edit, WM_GETFONT, 0, 0) as HGDIOBJ);
+    let mut size = SIZE { cx: 0, cy: 0 };
+    GetTextExtentPoint32W(dc, buf.as_ptr(), len as i32, &mut size);
+    SelectObject(dc, old);
+    ReleaseDC(edit, dc);
+    let dpi = windows_sys::Win32::UI::HiDpi::GetDpiForSystem().max(96) as i32;
+    let w = (size.cx + 20 * dpi / 96).clamp((80 * dpi / 96).min(max_w), max_w);
+    let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    GetWindowRect(edit, &mut rc);
+    if rc.right - rc.left != w {
+        SetWindowPos(edit, null_mut(), 0, 0, w, rc.bottom - rc.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        // Si había corrido el texto para hacerle lugar, vuelve al principio.
+        let (mut a, mut b) = (0u32, 0u32);
+        SendMessageW(edit, EM_GETSEL, &mut a as *mut u32 as usize, &mut b as *mut u32 as isize);
+        SendMessageW(edit, EM_SETSEL, 0, 0);
+        SendMessageW(edit, EM_SETSEL, a as usize, b as isize);
+        InvalidateRect(GetParent(edit), null(), 0);
+    }
+}
+
 unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let prev: WNDPROC = std::mem::transmute(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     let parent = GetParent(hwnd);
@@ -180,6 +212,11 @@ unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
         }
         WM_NCDESTROY => {
             SetWindowLongPtrW(hwnd, GWLP_WNDPROC, GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        }
+        WM_CHAR | WM_KEYDOWN | WM_PASTE | WM_CUT | WM_CLEAR | WM_UNDO => {
+            let r = CallWindowProcW(prev, hwnd, msg, wparam, lparam);
+            fit(hwnd);
+            return r;
         }
         _ => {}
     }

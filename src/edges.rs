@@ -97,6 +97,34 @@ pub fn track(note: HWND) {
     crate::frames::want(crate::frames::Who::Edges, true);
 }
 
+/// Mira cada tanto si el mouse se acerca a una nota desde afuera (por el
+/// escritorio): el marco aparece antes de entrar, y el borde se agarra
+/// desde la franja de afuera sin tener que pasar primero por la nota.
+pub fn start() {
+    unsafe { SetTimer(null_mut(), 0, 40, Some(poll)) };
+}
+
+unsafe extern "system" fn poll(_: HWND, _: u32, _: usize, _: u32) {
+    thread_local! {
+        static LAST: std::cell::Cell<(i32, i32)> = const { std::cell::Cell::new((i32::MIN, 0)) };
+    }
+    let p = cursor();
+    if LAST.with(|l| l.replace((p.x, p.y))) == (p.x, p.y) || RING.with(|r| r.borrow().note) != 0 || crate::snap::moving() {
+        return;
+    }
+    let out = px(OUT);
+    let notes: Vec<HWND> = crate::app::app().lock().unwrap().notes.values().map(|nr| nr.hwnd as HWND).filter(|h| !h.is_null()).collect();
+    let near = notes.into_iter().find(|&n| {
+        let rc = window_rect(n);
+        let band = p.x >= rc.left - out && p.x < rc.right + out && p.y >= rc.top - out && p.y < rc.bottom + out;
+        let inside = p.x >= rc.left && p.x < rc.right && p.y >= rc.top && p.y < rc.bottom;
+        band && !inside && IsWindowVisible(n) != 0
+    });
+    if let Some(n) = near.filter(|_| crate::desktop::is_desktop_visible_at(p.x, p.y)) {
+        track(n);
+    }
+}
+
 /// Pone el marco justo encima de la nota en el orden de las ventanas:
 /// poseído por ella si es de primer nivel; si está anclada (hija del
 /// escritorio), poseído por el escritorio, arriba de las notas y debajo

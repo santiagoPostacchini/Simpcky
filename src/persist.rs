@@ -413,9 +413,12 @@ pub struct Settings {
     /// enrollarla (ver `ROLL_DELAYS_MS`): para quien mueve el mouse sin
     /// querer, que no se le cierre la nota a cada rato.
     pub roll_delay: u8,
-    /// Ninguna nota sale al compartir pantalla (Teams, Discord, OBS…). Las
-    /// que tienen texto oculto no salen nunca (ver `note::is_private`).
+    /// Ninguna nota sale al compartir pantalla (Teams, Discord, OBS…).
+    /// Apagado, salen todas, también las que tienen texto oculto (ver `note::is_private`).
     pub hide_capture: bool,
+    /// Las notas de una pila se abren solas al pasar el mouse (Auto); si no,
+    /// con un clic en la barra (Manual).
+    pub pile_hover: bool,
 }
 
 /// Las esperas que se pueden elegir para el enrollado automático.
@@ -443,6 +446,7 @@ pub fn load_settings() -> Option<Settings> {
         },
         roll_delay: j.u8_or("rollDelay", 0).min(ROLL_DELAYS_MS.len() as u8 - 1),
         hide_capture: j.bool_or("hideCapture", false),
+        pile_hover: j.bool_or("pileHover", true),
     })
 }
 
@@ -451,7 +455,7 @@ pub fn save_settings(s: &Settings) -> bool {
         return false;
     }
     let json = format!(
-        "{{\"dark\":{},\"defaultRollMode\":{},\"desktopMenu\":{},\"autoUpdate\":{},\"translucency\":{},\"scale\":{},\"hotkey\":{},\"rollDelay\":{},\"hideCapture\":{}}}\n",
+        "{{\"dark\":{},\"defaultRollMode\":{},\"desktopMenu\":{},\"autoUpdate\":{},\"translucency\":{},\"scale\":{},\"hotkey\":{},\"rollDelay\":{},\"hideCapture\":{},\"pileHover\":{}}}\n",
         s.dark,
         s.default_roll_mode.as_u8(),
         s.desktop_menu,
@@ -461,6 +465,7 @@ pub fn save_settings(s: &Settings) -> bool {
         s.hotkey,
         s.roll_delay,
         s.hide_capture,
+        s.pile_hover,
     );
     write_atomic(&settings_path(), &json)
 }
