@@ -7,3 +7,4 @@ client_secret*.json
 
 # Instaladores generados (los publica GitHub Actions en cada release).
 dist/
+__pycache__/
