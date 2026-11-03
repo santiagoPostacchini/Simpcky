@@ -54,9 +54,10 @@ Ya funciona:
   "⋯" → Siempre encima) se convierte en una ventana normal, con botón en
   la barra de tareas y por encima de todo.
 - **Encabezado**: el título, y los botones (nota nueva, siempre encima,
-  enrollar, bloquear, "⋯") solo con el mouse encima o mientras se escribe, con
-  ayudas al posar el mouse. Arrastrar la barra mueve la nota; un clic
-  suelto ya no la enrolla (para eso está el botón y `Ctrl+R`).
+  bloquear, "⋯") solo con el mouse encima o mientras se escribe, con
+  ayudas al posar el mouse. Arrastrar la barra mueve la nota; en Manual, un
+  clic en la barra la enrolla o la desenrolla (también `Ctrl+R`); doble
+  clic la renombra.
 - **Menú "⋯" propio** (`flyout.rs`, al estilo de Windows 11): los seis
   colores como muestras — el único lugar donde se elige el color —,
   siempre encima, enrollado automático, cambiar nombre, duplicar, todas
@@ -177,6 +178,26 @@ Ya funciona:
   Alt+F4): deja el escritorio y queda guardada en "Todas las notas", con
   la tarjeta apagada y el ojo tachado. Vuelve con doble clic o
   arrastrándola afuera. Cerrar una nota ya no la borra.
+- **Texto oculto** (para claves): seleccionar y `Ctrl+H`, el ojo tachado
+  de la barrita de formato o del clic derecho. Se ve como una cápsula con
+  puntitos; un clic la muestra (con puntitos debajo) y otro la vuelve a
+  tapar, igual que enrollar la nota o cerrarla. Arrastrar encima selecciona
+  como siempre; el clic derecho lo copia directo (la cápsula se llena con un tilde). Copiado, va
+  como texto plano y fuera del historial del portapapeles (Win+V) y de la
+  nube. Se guarda como un estilo más (`h` en `fmt`; una versión
+  vieja lo muestra como texto común). No aparece en el título, las vistas
+  previas ni la búsqueda (`richtext::visible_text`): ahí sale `••••`. En el
+  RichEdit va marcado en `bAnimation` (que guarda y hereda al escribir pero
+  no dibuja), con la tinta del color del fondo mientras está tapado.
+- **Fuera de las capturas de pantalla**: las notas con texto oculto no salen
+  al compartir pantalla (Teams, Zoom, Discord, Meet, OBS, Recortes:
+  `WDA_EXCLUDEFROMCAPTURE`); quien mira ve lo que hay detrás. Con
+  Configuración → "Ocultar las notas al compartir pantalla", ninguna nota
+  sale (ni el selector ni "Todas las notas"). Windows solo excluye ventanas
+  de primer nivel, y una nota anclada es hija del escritorio: por eso las
+  privadas son, como en vidrio, ventanas poseídas por el escritorio
+  (`desktop::own`). No cubre el escritorio remoto, la "captura de juego"
+  de OBS ni una foto con el celular.
 - **Barra de formato al seleccionar** (`seltool.rs`): al soltar el mouse
   con texto seleccionado aparece arriba una barrita con B, I, U y S (las
   que ya tiene la selección, marcadas). Es una ventana `WS_EX_NOACTIVATE`
@@ -252,7 +273,8 @@ Ya funciona:
 - **Atajos de teclado** (sección 7 de la especificación), mientras el
   foco esté en una nota: `Ctrl+N` nueva nota, `Ctrl+R` enrollar /
   desenrollar, `Ctrl+Shift+T` siempre encima, `Ctrl+Shift+D` anclar al
-  escritorio, `F2` cambiar nombre, `Ctrl+W` ocultar (`Ctrl+N` también
+  escritorio, `F2` cambiar nombre, `Ctrl+W` ocultar, `Ctrl+H` ocultar
+  el texto seleccionado (`Ctrl+N` también
   en "Todas las notas"). Se resuelven en el bucle de mensajes (`main.rs`), antes
   de que el RichEdit se quede con la tecla. A propósito **no** son
   *hotkeys* globales: registrar Ctrl+N a nivel sistema se lo robaría a

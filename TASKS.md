@@ -45,7 +45,48 @@
   se quitó `CS_DROPSHADOW` (su `SysShadow` tampoco seguía a la nota). Con vidrio no se
   pudo probar: Windhawk no inyecta el mod en procesos lanzados desde la terminal.
 
-## En curso (rama `feat/celdas`, sale de `fix/bugs-notas`)
+## En curso (rama `feat/privacidad`, sale de `feat/celdas`)
+
+- Claude — Texto oculto (`Ctrl+H`, barrita de formato, clic derecho): cápsula con puntitos, clic
+  para mostrar/tapar, se tapa al enrollar o cerrar; fuera del título, vistas previas y búsqueda
+  (`visible_text`, con test). Notas con texto oculto fuera de las capturas de pantalla; ajuste
+  "Ocultar las notas al compartir pantalla" (`hideCapture`) para todas, el selector y "Todas las
+  notas". Las privadas son poseídas por el escritorio (como en vidrio).
+- Arreglos que salieron de esto: una sola escala para las notas en todos los monitores
+  (`note_dpi` = ppp del sistema; sin resize por `WM_DPICHANGED`), y `detach` que conserva el tamaño.
+- Verificado (instancia de prueba en el monitor 2 a 150 %): la nota con texto oculto no sale en la
+  captura y la otra sí; ocultar texto en una nota anclada la saca de la captura y mostrarlo la
+  devuelve, tres veces sin cambiar de tamaño; clic que muestra y tapa una sola clave; lo guardado
+  (`h16+5`) y nada al mostrarlo; el ajuste para todas.
+- Falta probar a mano: OBS, Teams y Discord de verdad; `Ctrl+H` y arrastrar sobre lo oculto con el
+  mouse real; enrollar con una clave a la vista; modo vidrio; Win+D con una nota privada.
+- Clic derecho sobre lo oculto: lo copia directo, sin menú (la cápsula se llena con un tilde); copiar algo oculto (menú o Ctrl+C) va como
+  texto plano fuera del historial del portapapeles y de la nube. Verificado con el menú en la
+  instancia de prueba (formatos `ExcludeClipboardContentFromMonitorProcessing` y compañía).
+  Ctrl+X sigue siendo el corte común.
+- Clic derecho sobre lo oculto: se atiende al apretar (antes el RichEdit movía el cursor ahí).
+  Verificado: copia y el cursor queda donde estaba.
+- Arrastrar entre monitores: al cruzar, el arrastre toma la cuadrícula y las pilas del monitor
+  nuevo (`Drag::rehome`), con la nota o la pila entera (Ctrl); la pila de la que salió se cierra
+  al soltar, o vuelve con Esc. Verificado con guion (cursor falso): suelta del monitor 1 a una
+  pila del 2, pila con Ctrl del 1 al 2, y sacar una de la pila del 2 al 1.
+- Nota asomada (Abrir bajo el mouse): lo que se le cambia de tamaño mientras está asomada no
+  queda; al volver recupera lugar y tamaño (vuelve a su pila). Sin probar (no hay guion para
+  asomar).
+- Prueba: sin el botón de enrollar; en Manual, un clic en la barra enrolla/desenrolla (si llega
+  el doble clic para renombrar, se deshace). Sin probar con mouse real (DragDetect).
+- Auto: una nota abierta no se enrolla con el mouse a menos de 40 px (no sobre otra nota),
+  mientras se selecciona texto con el botón apretado, ni con su menú abierto.
+- Pendiente: cifrado de `notes.json` y de Drive (se decide después).
+- Pendiente: el usuario vio una vez las notas "trabadas" (no se movían ni respondían) después de
+  instalar esta versión; se destrabaron reiniciando la app. Sin reproducir: sin captura del mouse
+  ni ventanas tapando después, y un registro de 3 minutos de uso (`GetGUIThreadInfo`, ventana bajo
+  el mouse) no mostró nada raro. Si vuelve: antes de reiniciar, mirar `GetGUIThreadInfo` (captura,
+  move/size) del hilo de Simpcky.
+- Raro visto en los datos: "Copypastes" quedó con `h=120` (el mínimo) y `x` fuera de pantalla con
+  su ancho; revisar cuándo se guarda el alto de una nota enrollada.
+
+## Hecho (rama `feat/celdas`, commiteada en `6e6b168`)
 
 - Claude — Celdas y pilas (`snap.rs`, ganchos en `note.rs`, `desktop::set_screen_rect`): panel al
   borde de arriba (4 tamaños + pila), cuadrícula por monitor, Ctrl + arrastrar (cuadrícula o pila

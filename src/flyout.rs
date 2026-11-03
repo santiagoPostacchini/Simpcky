@@ -137,6 +137,11 @@ pub fn is_open() -> bool {
     OPEN.with(|o| o.borrow().is_some())
 }
 
+/// ¿Hay un menú abierto de `owner`?
+pub fn is_open_for(owner: HWND) -> bool {
+    OPEN.with(|o| o.borrow().as_ref().is_some_and(|s| s.owner == owner))
+}
+
 /// Cierra el menú, si hay uno abierto.
 pub fn close() {
     let hwnd = OPEN.with(|o| o.borrow_mut().take().map(|s| s.hwnd));

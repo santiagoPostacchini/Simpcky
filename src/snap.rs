@@ -551,8 +551,9 @@ fn app_windows() -> Vec<RECT> {
         .collect()
 }
 
-fn dpi_at(x: i32, y: i32) -> i32 {
-    crate::flyout::dpi_at(x, y) * crate::note::scale_pct() / 100
+/// La escala de las notas, que es la misma en todos los monitores (ver `note::note_dpi`).
+fn dpi_at(_x: i32, _y: i32) -> i32 {
+    crate::note::note_dpi(null_mut())
 }
 
 fn px(dpi: i32, v: i32) -> i32 {
@@ -731,6 +732,12 @@ struct Drag {
     /// repetir las transiciones en cada paso).
     last_layout: Option<(i32, i32, Vec<u32>)>,
     fx: Fx,
+    /// El monitor de la cuadrícula y las pilas de ahora (cambia si el mouse pasa a otro).
+    monitor: HMONITOR,
+    /// Salió de una pila (aunque esa pila quede en otro monitor).
+    left_pile: bool,
+    /// La pila de la que salió, si quedó en otro monitor: se cierra al soltar.
+    behind: Option<(Pile, HashMap<u32, Info>, i32)>,
 }
 
 thread_local! {
@@ -759,14 +766,19 @@ pub fn busy() -> bool {
 }
 
 fn new_drag(hwnd: HWND, kind: Kind, grab: POINT) -> Drag {
+    build_drag(hwnd, kind, grab, cursor(), &[])
+}
+
+/// El arrastre en el monitor de `pt`. `carry`: las notas que se traen de
+/// otro monitor (la que se lleva, o la pila entera).
+fn build_drag(hwnd: HWND, kind: Kind, grab: POINT, pt: POINT, carry: &[Info]) -> Drag {
     let id = crate::note::note_id(hwnd);
-    let pt = cursor();
     let (monitor, work) = monitor_of(pt.x, pt.y);
     let dpi = dpi_at(pt.x, pt.y);
     let bar = crate::note::header_h(hwnd);
     let step = bar + px(dpi, PILE_GAP);
-    let infos = notes_on(monitor);
-    let snaps = infos.iter().any(|n| n.id == id);
+    let infos: Vec<Info> = notes_on(monitor).into_iter().filter(|n| !carry.iter().any(|c| c.id == n.id)).collect();
+    let snaps = !carry.is_empty() || infos.iter().any(|n| n.id == id);
     // La cuadrícula, en lo que dejan libre las aplicaciones a la vista (si no
     // queda lugar para una celda, el monitor entero).
     // Las aplicaciones a la vista: la cuadrícula sigue su acomodo y no se usa debajo de ellas.
@@ -827,7 +839,7 @@ fn new_drag(hwnd: HWND, kind: Kind, grab: POINT) -> Drag {
         dpi,
         step,
         bar,
-        by_id: infos.into_iter().map(|n| (n.id, n)).collect(),
+        by_id: infos.into_iter().chain(carry.iter().copied()).map(|n| (n.id, n)).collect(),
         piles,
         from,
         moving,
@@ -843,6 +855,9 @@ fn new_drag(hwnd: HWND, kind: Kind, grab: POINT) -> Drag {
         plan: Vec::new(),
         last_layout: None,
         fx: Fx::new(work, area, dpi),
+        monitor,
+        left_pile: from.is_some(),
+        behind: None,
     }
 }
 
@@ -983,6 +998,9 @@ fn step() {
     DRAG.with(|s| {
         let Some(mut s) = s.try_borrow_mut().ok() else { return };
         let Some(d) = s.as_mut() else { return };
+        if d.kind != Kind::Size {
+            d.rehome();
+        }
         match d.kind {
             Kind::Move => d.update_move(),
             Kind::PileMove => d.update_pile_move(),
@@ -993,6 +1011,44 @@ fn step() {
 }
 
 impl Drag {
+    /// El mouse pasó a otro monitor: desde ahí valen su cuadrícula y sus
+    /// pilas, y se trae lo que se lleva (la nota, o la pila entera). Lo de
+    /// acá vuelve a como estaba, salvo la pila de la que salió la nota, que
+    /// se cierra al soltar (o vuelve, con Esc).
+    fn rehome(&mut self) {
+        let pt = cursor();
+        if !self.snaps || !self.moved || monitor_of(pt.x, pt.y).0 == self.monitor {
+            return;
+        }
+        self.replan(Vec::new());
+        for (k, p) in self.piles.iter().enumerate() {
+            if Some(k) == self.moving || Some(k) == self.from {
+                continue;
+            }
+            for id in &p.ids {
+                if let Some(n) = self.by_id.get(id) {
+                    anim::to_pos(n.hwnd, n.x, n.y, anim::MOVE_MS);
+                }
+            }
+        }
+        if let Some(p) = self.from {
+            let pile = self.piles[p].clone();
+            let infos = pile.ids.iter().filter_map(|k| self.by_id.get(k).map(|n| (*k, *n))).collect();
+            self.behind = Some((pile, infos, self.step));
+        }
+        let moving = self.moving.map(|p| self.piles[p].clone());
+        let ids = moving.as_ref().map(|p| p.ids.clone()).unwrap_or_else(|| vec![self.id]);
+        let carry: Vec<Info> = ids.iter().filter_map(|k| self.by_id.get(k).copied()).collect();
+        self.fx.close();
+        let mut d = build_drag(self.hwnd, self.kind, self.grab, pt, &carry);
+        if let Some(p) = moving {
+            d.piles.push(p);
+            d.moving = Some(d.piles.len() - 1);
+        }
+        (d.orig, d.moved, d.mode, d.left_pile, d.behind) = (self.orig, true, self.mode, self.left_pile, self.behind.take());
+        *self = d;
+    }
+
     fn max_w(&self, p: &Pile) -> i32 {
         p.ids.iter().filter_map(|k| self.by_id.get(k)).map(|n| n.w).max().unwrap_or(0)
     }
@@ -1427,6 +1483,11 @@ fn end(cancel: bool) {
                 }
             }
         }
+        if let Some((_, infos, _)) = &d.behind {
+            for n in infos.values() {
+                anim::to_pos(n.hwnd, n.x, n.y, anim::MOVE_MS);
+            }
+        }
         if d.kind != Kind::Size {
             let o = d.orig;
             crate::note::reshape(hwnd, Some((o.w, o.h)), o.rolled);
@@ -1437,6 +1498,9 @@ fn end(cancel: bool) {
             crate::note::trash(hwnd);
         }
         return;
+    }
+    if let Some((pile, infos, step)) = &d.behind {
+        settle_pile(pile, infos, *step);
     }
     // Las notas achicadas o corridas quedan así.
     for (id, k) in &d.plan {
@@ -1456,7 +1520,7 @@ fn end(cancel: bool) {
             if let Some(p) = d.from {
                 settle_pile(&d.piles[p], &d.by_id, d.step);
             }
-            let from_pile = d.from.is_some();
+            let from_pile = d.left_pile;
             if from_pile {
                 // Sacada de una pila: se abre y pasa a Manual (salvo que vuelva a una).
                 crate::note::set_roll_mode(hwnd, RollMode::Manual);

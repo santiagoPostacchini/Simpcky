@@ -113,6 +113,7 @@ fn main() {
         scale: 0,
         hotkey: 2,
         roll_delay: 0,
+        hide_capture: false,
     });
     theme::init(settings.dark);
 

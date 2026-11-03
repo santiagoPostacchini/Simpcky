@@ -255,8 +255,14 @@ fn create() {
         // ventana, si no se ve un destello blanco.
         theme::apply_title_bar(hwnd);
         theme::apply_scrollbars(hwnd);
+        crate::note::exclude_if_chosen(hwnd);
         crate::win::show_normal(hwnd);
     }
+}
+
+/// La ventana, si está abierta (nulo si no).
+pub fn window() -> HWND {
+    STATE.get().map(|s| s.lock().unwrap().hwnd).unwrap_or(0) as HWND
 }
 
 /// Algo cambió en las notas (se llama desde `save_all`): si la ventana
@@ -319,8 +325,7 @@ fn get_window_text(hwnd: HWND) -> String {
 /// línea (la primera ya se muestra como título).
 pub(crate) fn preview_of(data: &NoteData) -> String {
     let skip = if data.title.trim().is_empty() { 1 } else { 0 };
-    let body: String = data
-        .text
+    let body: String = crate::richtext::visible_text(&data.text, &data.fmt)
         .lines()
         .skip(skip)
         .map(str::trim)

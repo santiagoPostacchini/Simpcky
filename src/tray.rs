@@ -414,6 +414,17 @@ pub fn set_translucency(level: u8) {
     }
 }
 
+/// Ocultar (o no) todas las notas al compartir pantalla.
+pub fn toggle_hide_capture() {
+    {
+        let mut a = app().lock().unwrap();
+        a.settings.hide_capture = !a.settings.hide_capture;
+    }
+    save_settings();
+    note::update_privacy_all();
+    crate::note::exclude_if_chosen(crate::allnotes::window());
+}
+
 pub fn toggle_desktop_menu() {
     let enable = {
         let mut a = app().lock().unwrap();

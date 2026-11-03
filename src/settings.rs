@@ -90,6 +90,7 @@ pub enum Hit {
     Pick(Choice, u8),
     Autostart,
     DesktopMenu,
+    HideCapture,
     CheckUpdate,
     InstallUpdate,
     AutoUpdate,
@@ -133,9 +134,9 @@ enum Row {
 /// Las filas, con su lugar (coordenadas del contenido), para un ancho
 /// de cliente `cw`.
 fn rows(cw: i32) -> Vec<(Row, RECT)> {
-    let (roll_auto, desktop_menu) = {
+    let (roll_auto, desktop_menu, hide_capture) = {
         let a = app().lock().unwrap();
-        (a.settings.default_roll_mode == RollMode::Auto, a.settings.desktop_menu)
+        (a.settings.default_roll_mode == RollMode::Auto, a.settings.desktop_menu, a.settings.hide_capture)
     };
     let version = crate::update::version_text(crate::update::current());
     let update = match crate::update::available() {
@@ -158,6 +159,9 @@ fn rows(cw: i32) -> Vec<(Row, RECT)> {
         (Row::Label("Atajo para traer una nota al frente"), 28),
         (Row::Segments(Choice::Hotkey), SEGMENTS_H),
         (Row::Hint(hotkey_hint), HINT_H),
+        (Row::Section("PRIVACIDAD"), SECTION_H),
+        (Row::Switch(Hit::HideCapture, "Ocultar las notas al compartir pantalla", hide_capture), ROW_H),
+        (Row::Hint("Teams, Zoom, Discord, OBS y las capturas no las ven. Las que tienen texto oculto, nunca."), HINT_H),
         (Row::Section("APARIENCIA"), SECTION_H),
         (Row::Switch(Hit::Dark, "Modo oscuro", theme::is_dark()), ROW_H),
         (Row::Label("Transparencia (requiere Windhawk)"), 28),
@@ -267,6 +271,7 @@ pub fn click(hit: Hit) {
         Hit::Pick(c, v) => c.set(v),
         Hit::Autostart => crate::shell::set_autostart(!crate::shell::is_autostart_enabled()),
         Hit::DesktopMenu => crate::tray::toggle_desktop_menu(),
+        Hit::HideCapture => crate::tray::toggle_hide_capture(),
         Hit::CheckUpdate => crate::update::check_now(),
         Hit::InstallUpdate => crate::update::install(),
         Hit::AutoUpdate => crate::update::toggle_auto(),

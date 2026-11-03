@@ -165,6 +165,7 @@ fn show() {
             return;
         }
         STATE.lock().unwrap().hwnd = hwnd as isize;
+        crate::note::exclude_if_chosen(hwnd);
         let pref: i32 = DWMWCP_ROUND;
         DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE as u32, &pref as *const i32 as *const _, 4);
         ShowWindow(hwnd, SW_SHOW);

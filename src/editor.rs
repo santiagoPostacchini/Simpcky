@@ -32,13 +32,13 @@ use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::Graphics::GdiPlus::*;
 use windows_sys::Win32::UI::Controls::{EM_CHARFROMPOS, EM_POSFROMCHAR, EM_SETREADONLY};
-use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::flyout::{self, Entry, Glyph, Tool};
-use crate::richtext::{self, List, Styles, BOLD, ITALIC, STRIKE, STYLES, UNDERLINE};
+use crate::richtext::{self, List, Styles, BOLD, ITALIC, SECRET, STRIKE, STYLES, UNDERLINE};
 use crate::win::wide;
 
 // -----------------------------------------------------------------
@@ -74,6 +74,8 @@ const SCF_ALL: usize = 0x0004;
 const ES_NOOLEDRAGDROP: u32 = 0x0008;
 const ES_DISABLENOSCROLL: u32 = 0x2000;
 const WM_MOUSELEAVE: u32 = 0x02A3;
+const WM_DPICHANGED_BEFOREPARENT: u32 = 0x02E2;
+const WM_DPICHANGED_AFTERPARENT: u32 = 0x02E3;
 
 const CFM_BOLD: u32 = 0x0000_0001;
 const CFM_ITALIC: u32 = 0x0000_0002;
@@ -90,9 +92,16 @@ const CFM_OFFSET: u32 = 0x1000_0000;
 const CFM_FACE: u32 = 0x2000_0000;
 const CFM_COLOR: u32 = 0x4000_0000;
 const CFM_SIZE: u32 = 0x8000_0000;
+const CFM_ANIMATION: u32 = 0x0004_0000;
 const CFE_AUTOBACKCOLOR: u32 = CFM_BACKCOLOR;
-/// Los cuatro estilos, en el orden de `richtext` (b, i, u, s).
-const STYLE_MASKS: [u32; STYLES] = [CFM_BOLD, CFM_ITALIC, CFM_UNDERLINE, CFM_STRIKEOUT];
+/// Los cuatro estilos que son efectos del RichEdit, en el orden de
+/// `richtext` (b, i, u, s). El quinto, oculto, va aparte (`SECRET_*`).
+const STYLE_MASKS: [u32; 4] = [CFM_BOLD, CFM_ITALIC, CFM_UNDERLINE, CFM_STRIKEOUT];
+/// Texto oculto: marcado en `bAnimation`, que el RichEdit guarda y hereda al
+/// escribir como cualquier formato pero no dibuja (comprobado). Tapado, la
+/// tinta es del color del fondo: no se ve aunque la tapa llegue tarde.
+const SECRET_HIDDEN: u8 = 1;
+const SECRET_SHOWN: u8 = 2;
 
 const PFM_STARTINDENT: u32 = 0x0001;
 const PFM_RIGHTINDENT: u32 = 0x0002;
@@ -211,6 +220,8 @@ const ID_PASTE: u32 = 3022;
 const ID_SELECT_ALL: u32 = 3023;
 const ID_EMOJI: u32 = 3024;
 pub const ID_LAST: u32 = 3099;
+/// "Ocultar" de Segoe Fluent Icons (un ojo tachado).
+pub const SECRET_GLYPH: u16 = 0xED1A;
 
 struct EditState {
     doc: *mut c_void,
@@ -237,11 +248,17 @@ struct EditState {
     glass: Option<u8>,
     /// Nota bloqueada: solo lectura (se puede seleccionar y copiar).
     locked: bool,
+    /// Tramos ocultos (inicio, fin, a la vista), la última vez que se miró
+    /// (ver `scan_secrets`).
+    secrets: Vec<(usize, usize, bool)>,
+    /// El tramo oculto recién copiado con clic derecho (destella un momento).
+    copied: Option<usize>,
 }
 
 /// Temporizador del RichEdit para acomodar la presentación un momento
 /// después de cada cambio (ver `schedule_refresh`).
 const TIMER_REFRESH: usize = 0x5E1C;
+const TIMER_COPIED: usize = 0x5E1D;
 
 thread_local! {
     static EDITS: RefCell<HashMap<isize, EditState>> = RefCell::new(HashMap::new());
@@ -323,6 +340,8 @@ pub fn create(parent: HWND, hinstance: HINSTANCE, id: usize, rc: RECT) -> HWND {
                     bar_drag: None,
                     glass: None,
                     locked: false,
+                    secrets: Vec::new(),
+                    copied: None,
                 })
         });
         SetWindowSubclass(edit, Some(subclass_proc), 1, 0);
@@ -495,8 +514,8 @@ fn pos(edit: HWND, cp: usize) -> POINT {
     p
 }
 
-fn twips(edit: HWND, px: i32) -> i32 {
-    let dpi = unsafe { GetDpiForWindow(edit) }.max(96) as i32;
+fn twips(_edit: HWND, px: i32) -> i32 {
+    let dpi = unsafe { GetDpiForSystem() }.max(96) as i32;
     px * 1440 / dpi
 }
 
@@ -612,15 +631,18 @@ pub fn load(edit: HWND, text: &str, fmt: &str) {
         for (k, spans) in st.spans.iter().enumerate() {
             for &(s, l) in spans {
                 select(edit, s as usize, (s + l) as usize);
-                set_format(edit, SCF_SELECTION, &CharFormat::new(STYLE_MASKS[k], STYLE_MASKS[k]));
+                set_format(edit, SCF_SELECTION, &style_format(k, true, body));
             }
         }
         let paras = richtext::paragraphs(&all);
         decorate(edit, &all, &paras, ink, body);
         let emojis = fix_faces(edit, &all);
+        let secrets: Vec<(usize, usize, bool)> = st.spans[SECRET].iter().map(|&(s, l)| (s as usize, (s + l) as usize, false)).collect();
+        hide_secrets(edit, &secrets, body);
         with_state(edit, |s| {
             s.lists = list_signature(&all);
             s.emojis = emojis;
+            s.secrets = secrets;
         });
     }
     // Cursor y vista al principio: una nota larga se ve desde arriba.
@@ -658,6 +680,7 @@ pub fn set_colors(edit: HWND, body: u32, ink: u32) {
     let all = units(edit);
     let paras = richtext::paragraphs(&all);
     decorate(edit, &all, &paras, ink, body);
+    hide_secrets(edit, &with_state(edit, |s| s.secrets.clone()).unwrap_or_default(), body);
     // Lo que se escriba de ahora en más, también con la tinta nueva.
     drop(_q);
     let (a, b) = selection(edit);
@@ -670,6 +693,13 @@ pub fn set_colors(edit: HWND, body: u32, ink: u32) {
 /// Si cambió qué párrafos son listas (se tildó con Ctrl+Z, se borró una
 /// marca a mano…) o dónde hay emojis, vuelve a acomodar la presentación.
 pub fn refresh(edit: HWND) {
+    // Lo oculto se movió (se escribió antes, se deshizo…): tapas y tintas al día.
+    let secrets = scan_secrets(edit);
+    if with_state(edit, |s| s.secrets != secrets).unwrap_or(false) {
+        with_state(edit, |s| s.secrets = secrets.clone());
+        writable(edit, || recolor(edit, &secrets));
+        unsafe { InvalidateRect(edit, null(), 0) };
+    }
     let all = units(edit);
     let sig = list_signature(&all);
     let emojis = richtext::emoji_clusters(&all);
@@ -721,43 +751,17 @@ pub fn read(edit: HWND) -> (String, String) {
     let mut st = Styles::default();
     {
         let _q = Quiet::new(edit);
-        // Recorre el texto por tramos de formato parejo: agranda el tramo
-        // al doble mientras siga parejo y después ajusta con búsqueda
-        // binaria. Unos pocos mensajes por tramo, no uno por letra.
-        let uniform = |a: usize, b: usize| -> Option<u32> {
-            select(edit, a, b);
-            let cf = get_format(edit);
-            let all_masks = CFM_BOLD | CFM_ITALIC | CFM_UNDERLINE | CFM_STRIKEOUT;
-            (cf.mask & all_masks == all_masks).then_some(cf.effects & all_masks)
-        };
-        let mut p = 0;
-        while p < n {
-            let state = uniform(p, p + 1).unwrap_or(0);
-            let (mut lo, mut hi, mut step) = (p + 1, n + 1, 1);
-            while lo < n {
-                let q = (lo + step).min(n);
-                if uniform(p, q) == Some(state) {
-                    lo = q;
-                    step *= 2;
-                } else {
-                    hi = q;
-                    break;
-                }
-            }
-            while hi > lo + 1 {
-                let mid = (lo + hi) / 2;
-                if uniform(p, mid) == Some(state) {
-                    lo = mid;
-                } else {
-                    hi = mid;
-                }
-            }
+        let all_masks = CFM_BOLD | CFM_ITALIC | CFM_UNDERLINE | CFM_STRIKEOUT;
+        let key = |cf: &CharFormat| (cf.mask & (all_masks | CFM_ANIMATION) == all_masks | CFM_ANIMATION).then_some(cf.effects & all_masks | ((cf.animation != 0) as u32) << 8);
+        for (p, lo, state) in runs(edit, n, key) {
             for (k, m) in STYLE_MASKS.iter().enumerate() {
                 if state & m != 0 {
                     st.spans[k].push((p as u32, (lo - p) as u32));
                 }
             }
-            p = lo;
+            if state & 0x100 != 0 {
+                st.spans[SECRET].push((p as u32, (lo - p) as u32));
+            }
         }
     }
     // El tachado de las tareas hechas es de la tarea, no del texto.
@@ -771,6 +775,44 @@ pub fn read(edit: HWND) -> (String, String) {
     (text, richtext::styles_to_string(&st))
 }
 
+/// Recorre [0, n) por tramos de formato parejo según `key` (`None`: no
+/// parejo): agranda el tramo al doble mientras siga parejo y después ajusta
+/// con búsqueda binaria. Unos pocos mensajes por tramo, no uno por letra.
+/// Mueve la selección: va dentro de un `Quiet`.
+fn runs(edit: HWND, n: usize, key: impl Fn(&CharFormat) -> Option<u32>) -> Vec<(usize, usize, u32)> {
+    let uniform = |a: usize, b: usize| -> Option<u32> {
+        select(edit, a, b);
+        key(&get_format(edit))
+    };
+    let mut out = Vec::new();
+    let mut p = 0;
+    while p < n {
+        let state = uniform(p, p + 1).unwrap_or(0);
+        let (mut lo, mut hi, mut step) = (p + 1, n + 1, 1);
+        while lo < n {
+            let q = (lo + step).min(n);
+            if uniform(p, q) == Some(state) {
+                lo = q;
+                step *= 2;
+            } else {
+                hi = q;
+                break;
+            }
+        }
+        while hi > lo + 1 {
+            let mid = (lo + hi) / 2;
+            if uniform(p, mid) == Some(state) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        out.push((p, lo, state));
+        p = lo;
+    }
+    out
+}
+
 /// Qué estilos tiene la selección (todos parejos), para los botones del
 /// menú.
 fn style_state(edit: HWND) -> [bool; STYLES] {
@@ -779,7 +821,147 @@ fn style_state(edit: HWND) -> [bool; STYLES] {
     for (k, m) in STYLE_MASKS.iter().enumerate() {
         out[k] = cf.mask & m != 0 && cf.effects & m != 0;
     }
+    out[SECRET] = cf.mask & CFM_ANIMATION != 0 && cf.animation != 0;
     out
+}
+
+/// El formato que pone (o saca) el estilo `k`. Oculto: tapado y con la
+/// tinta del fondo (`body`); al sacarlo, la tinta vuelve con `recolor`.
+fn style_format(k: usize, on: bool, body: u32) -> CharFormat {
+    if k != SECRET {
+        return CharFormat::new(STYLE_MASKS[k], if on { STYLE_MASKS[k] } else { 0 });
+    }
+    let mut cf = CharFormat::new(CFM_ANIMATION | if on { CFM_COLOR } else { 0 }, 0);
+    cf.animation = if on { SECRET_HIDDEN } else { 0 };
+    cf.color = body;
+    cf
+}
+
+// -----------------------------------------------------------------
+// Texto oculto
+// -----------------------------------------------------------------
+
+/// Los tramos ocultos del texto, como (inicio, fin, a la vista).
+fn scan_secrets(edit: HWND) -> Vec<(usize, usize, bool)> {
+    let n = units(edit).len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let _q = Quiet::new(edit);
+    runs(edit, n, |cf| (cf.mask & CFM_ANIMATION != 0).then_some(cf.animation as u32))
+        .into_iter()
+        .filter(|&(_, _, a)| a != 0)
+        .map(|(p, q, a)| (p, q, a == SECRET_SHOWN as u32))
+        .collect()
+}
+
+/// Los tapados, con la tinta del color del fondo (va dentro de un `Quiet`).
+fn hide_secrets(edit: HWND, secrets: &[(usize, usize, bool)], body: u32) {
+    let mut cf = CharFormat::new(CFM_COLOR, 0);
+    cf.color = body;
+    for &(a, b, shown) in secrets {
+        if !shown {
+            select(edit, a, b);
+            set_format(edit, SCF_SELECTION, &cf);
+        }
+    }
+}
+
+/// Toda la tinta de nuevo: la normal, las tareas hechas en gris y los
+/// tapados del color del fondo.
+fn recolor(edit: HWND, secrets: &[(usize, usize, bool)]) {
+    let (ink, body) = colors(edit);
+    let _q = Quiet::new(edit);
+    let mut cf = CharFormat::new(CFM_COLOR, 0);
+    cf.color = ink;
+    set_format(edit, SCF_ALL, &cf);
+    let all = units(edit);
+    decorate(edit, &all, &richtext::paragraphs(&all), ink, body);
+    hide_secrets(edit, secrets, body);
+}
+
+/// Hace `f` aunque la nota esté bloqueada (el RichEdit en solo lectura no
+/// acepta cambios de formato): mostrar u ocultar no es editar.
+fn writable<R>(edit: HWND, f: impl FnOnce() -> R) -> R {
+    let ro = locked(edit);
+    if ro {
+        unsafe { send(edit, EM_SETREADONLY, 0, 0) };
+    }
+    let r = f();
+    if ro {
+        unsafe { send(edit, EM_SETREADONLY, 1, 0) };
+    }
+    r
+}
+
+/// Muestra u oculta el tramo `i` (clic sobre él).
+fn toggle_reveal(edit: HWND, i: usize) {
+    let Some(mut secrets) = with_state(edit, |s| s.secrets.clone()) else { return };
+    let Some(&(a, b, shown)) = secrets.get(i) else { return };
+    secrets[i].2 = !shown;
+    writable(edit, || {
+        {
+            let _q = Quiet::new(edit);
+            let mut cf = CharFormat::new(CFM_ANIMATION, 0);
+            cf.animation = if shown { SECRET_HIDDEN } else { SECRET_SHOWN };
+            select(edit, a, b);
+            set_format(edit, SCF_SELECTION, &cf);
+        }
+        recolor(edit, &secrets);
+    });
+    with_state(edit, |s| s.secrets = secrets);
+    unsafe { InvalidateRect(edit, null(), 0) };
+}
+
+/// Todo lo oculto, tapado de nuevo (la nota se enrolla o se cierra).
+pub fn hide_all_secrets(edit: HWND) {
+    let Some(secrets) = with_state(edit, |s| s.secrets.clone()) else { return };
+    for i in (0..secrets.len()).filter(|&i| secrets[i].2) {
+        toggle_reveal(edit, i);
+    }
+}
+
+/// ¿Hay texto oculto? (Para sacar la nota de las capturas de pantalla.)
+pub fn has_secrets(edit: HWND) -> bool {
+    with_state(edit, |s| !s.secrets.is_empty()).unwrap_or(false)
+}
+
+/// Los renglones que ocupa [a, b) en pantalla (coordenadas del RichEdit).
+fn secret_rects(edit: HWND, text: &[u16], a: usize, b: usize) -> Vec<RECT> {
+    let em = em_px(edit);
+    let mut out = Vec::new();
+    let mut cp = a;
+    while cp < b {
+        let line = unsafe { send(edit, EM_EXLINEFROMCHAR, 0, cp as isize) };
+        let next = unsafe { send(edit, EM_LINEINDEX, (line + 1) as usize, 0) };
+        let end = if next > cp as isize { (next as usize).min(b) } else { b };
+        let p0 = pos(edit, cp);
+        // Sin el salto de párrafo del final, si lo incluye.
+        let last = if text.get(end.wrapping_sub(1)) == Some(&('\r' as u16)) { end - 1 } else { end };
+        let pe = pos(edit, last);
+        let right = if last < text.len() && pe.y == p0.y && pe.x >= p0.x {
+            pe.x
+        } else {
+            pos(edit, last.saturating_sub(1).max(cp)).x + em / 2
+        };
+        if right > p0.x {
+            out.push(RECT { left: p0.x, top: p0.y, right, bottom: line_bottom(edit, cp, p0.y) });
+        }
+        cp = end;
+    }
+    out
+}
+
+/// El tramo oculto bajo el punto (coordenadas del RichEdit), si hay.
+fn secret_at(edit: HWND, x: i32, y: i32) -> Option<usize> {
+    let secrets = with_state(edit, |s| s.secrets.clone())?;
+    if secrets.is_empty() {
+        return None;
+    }
+    let text = units(edit);
+    secrets
+        .iter()
+        .position(|&(a, b, _)| secret_rects(edit, &text, a, b.min(text.len())).iter().any(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom))
 }
 
 /// Avisa a la nota que el contenido cambió (el RichEdit no manda
@@ -799,7 +981,15 @@ pub fn toggle_style(edit: HWND, style: usize) {
         return;
     }
     let on = style_state(edit)[style];
-    set_format(edit, SCF_SELECTION, &CharFormat::new(STYLE_MASKS[style], if on { 0 } else { STYLE_MASKS[style] }));
+    set_format(edit, SCF_SELECTION, &style_format(style, !on, colors(edit).1));
+    if style == SECRET {
+        let secrets = scan_secrets(edit);
+        recolor(edit, &secrets);
+        with_state(edit, |s| s.secrets = secrets);
+        unsafe { InvalidateRect(edit, null(), 0) };
+        // Con texto oculto, la nota sale de las capturas de pantalla.
+        crate::note::update_privacy(unsafe { GetParent(edit) });
+    }
     changed(edit);
 }
 
@@ -1082,6 +1272,7 @@ fn show_menu(edit: HWND, screen: Option<POINT>) {
             tool(ID_STYLE + ITALIC as u32, Glyph::Letter('I', ITALIC), styles[ITALIC]),
             tool(ID_STYLE + UNDERLINE as u32, Glyph::Letter('U', UNDERLINE), styles[UNDERLINE]),
             tool(ID_STYLE + STRIKE as u32, Glyph::Letter('S', STRIKE), styles[STRIKE]),
+            tool(ID_STYLE + SECRET as u32, Glyph::Icon(SECRET_GLYPH), styles[SECRET]),
             tool(ID_BULLETS, Glyph::Icon(0xE8FD), kind == List::Bullet),
             tool(ID_TODO, Glyph::Icon(0xE73A), matches!(kind, List::Todo { .. })),
         ]),
@@ -1111,7 +1302,9 @@ pub fn command(edit: HWND, id: u32) {
                 send(edit, WM_CUT, 0, 0);
             }
             ID_COPY => {
-                send(edit, WM_COPY, 0, 0);
+                if !copy_secret(edit) {
+                    send(edit, WM_COPY, 0, 0);
+                }
             }
             ID_PASTE => {
                 send(edit, WM_PASTE, 0, 0);
@@ -1121,6 +1314,66 @@ pub fn command(edit: HWND, id: u32) {
             _ => {}
         }
     }
+}
+
+/// Si la selección toca texto oculto, la copia como texto plano marcada
+/// para que no quede en el historial del portapapeles (Win+V) ni se
+/// sincronice a otros equipos. `false`: no hay nada oculto, que copie el
+/// RichEdit como siempre.
+fn copy_secret(edit: HWND) -> bool {
+    let (s, e) = selection(edit);
+    let secrets = with_state(edit, |st| st.secrets.clone()).unwrap_or_default();
+    if s == e || !secrets.iter().any(|&(a, b, _)| a < e && s < b) {
+        return false;
+    }
+    copy_units(edit, s, e);
+    true
+}
+
+/// Copia [s, e) como texto plano, fuera del historial y de la nube.
+fn copy_units(edit: HWND, s: usize, e: usize) {
+    use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW};
+    let text = units(edit);
+    let mut out: Vec<u16> = Vec::new();
+    for &c in &text[s.min(text.len())..e.min(text.len())] {
+        out.extend_from_slice(if c == 13 { &[13, 10] } else { std::slice::from_ref(&c) });
+    }
+    while matches!(out.last(), Some(10 | 13)) {
+        out.pop();
+    }
+    out.push(0);
+    unsafe {
+        // Sin portapapeles no se copia nada: mejor que caer en la copia común.
+        if OpenClipboard(edit) == 0 {
+            return;
+        }
+        EmptyClipboard();
+        let bytes = std::slice::from_raw_parts(out.as_ptr() as *const u8, out.len() * 2);
+        set_clipboard(13, bytes); // CF_UNICODETEXT
+        for name in ["ExcludeClipboardContentFromMonitorProcessing", "CanIncludeInClipboardHistory", "CanUploadToCloudClipboard"] {
+            set_clipboard(RegisterClipboardFormatW(wide(name).as_ptr()), &0u32.to_ne_bytes());
+        }
+        CloseClipboard();
+    }
+}
+
+unsafe fn set_clipboard(format: u32, data: &[u8]) {
+    use windows_sys::Win32::Foundation::GlobalFree;
+    use windows_sys::Win32::System::DataExchange::SetClipboardData;
+    use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    let h = GlobalAlloc(GMEM_MOVEABLE, data.len());
+    if h.is_null() {
+        return;
+    }
+    let p = GlobalLock(h) as *mut u8;
+    if !p.is_null() {
+        std::ptr::copy_nonoverlapping(data.as_ptr(), p, data.len());
+        GlobalUnlock(h);
+        if !SetClipboardData(format, h).is_null() {
+            return;
+        }
+    }
+    GlobalFree(h);
 }
 
 pub fn toggle_bullets(edit: HWND) {
@@ -1241,9 +1494,9 @@ unsafe fn paint_buffered(edit: HWND) -> bool {
 /// en esa medida, así la barra queda del otro lado del borde, recortada.
 /// El RichEdit la sigue manejando (rueda, teclado, rangos); acá solo se
 /// dibuja una más fina encima.
-pub fn hidden_bar_width(hwnd: HWND) -> i32 {
+pub fn hidden_bar_width(_hwnd: HWND) -> i32 {
     unsafe {
-        windows_sys::Win32::UI::HiDpi::GetSystemMetricsForDpi(SM_CXVSCROLL, GetDpiForWindow(hwnd).max(96))
+        windows_sys::Win32::UI::HiDpi::GetSystemMetricsForDpi(SM_CXVSCROLL, GetDpiForSystem().max(96))
     }
 }
 
@@ -1353,7 +1606,8 @@ unsafe fn draw_marks(edit: HWND, hdc: HDC) {
     }
     let clusters = richtext::emoji_clusters(&text);
     let todos = richtext::checkboxes(&text);
-    if clusters.is_empty() && todos.is_empty() {
+    let secrets = with_state(edit, |s| s.secrets.clone()).unwrap_or_default();
+    if clusters.is_empty() && todos.is_empty() && secrets.is_empty() {
         return;
     }
     let (ink, body) = colors(edit);
@@ -1410,7 +1664,71 @@ unsafe fn draw_marks(edit: HWND, hdc: HDC) {
         };
         crate::d2d::draw_emoji(hdc, cell, clip, &text[a..b], em as u32, bg);
     }
+
+    let copied = with_state(edit, |s| s.copied).flatten();
+    for (i, (a, b, shown)) in secrets.into_iter().enumerate() {
+        let flash = copied == Some(i);
+        for r in secret_rects(edit, &text, a, b.min(text.len())) {
+            if r.top < clip.bottom && r.bottom > clip.top {
+                draw_secret(edit, hdc, r, shown && !flash, flash, ink, body);
+            }
+        }
+    }
     RestoreDC(hdc, saved);
+}
+
+/// Un renglón de texto oculto. Tapado: una cápsula con puntitos sobre el
+/// fondo (el texto ya es del color del fondo; la cápsula tapa también la
+/// selección). A la vista: puntitos debajo, para saber que es secreto.
+unsafe fn draw_secret(edit: HWND, hdc: HDC, r: RECT, shown: bool, flash: bool, ink: u32, body: u32) {
+    let em = em_px(edit);
+    let (w, h) = (r.right - r.left, r.bottom - r.top);
+    let dots = |g: *mut GpGraphics, x0: f32, y: f32, dot: f32, step: f32, n: i32, alpha: u8| {
+        for k in 0..n {
+            let x = x0 + k as f32 * step;
+            let d = RECT { left: x.round() as i32, top: y.round() as i32, right: (x + dot).round() as i32, bottom: (y + dot).round() as i32 };
+            flyout::fill_round_argb(g, &d, dot / 2.0, crate::glass::argb(faded(ink, body), alpha));
+        }
+    };
+    if shown {
+        let mut g: *mut GpGraphics = null_mut();
+        if GdipCreateFromHDC(hdc, &mut g) == Ok && !g.is_null() {
+            GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
+            let dot = (em as f32 / 10.0).max(1.5);
+            let step = dot * 2.5;
+            dots(g, r.left as f32, r.bottom as f32 - dot * 1.5, dot, step, (w as f32 / step).ceil() as i32, 200);
+            GdipDeleteGraphics(g);
+        }
+        return;
+    }
+    let Some(c) = crate::glass::Canvas::new(w, h) else { return };
+    c.fill(RECT { left: 0, top: 0, right: w, bottom: h }, body, glass(edit).unwrap_or(255));
+    c.with_graphics(|g| {
+        let pad = (em / 8).max(1);
+        let pill = RECT { left: 0, top: pad, right: w, bottom: h - pad };
+        let ph = (pill.bottom - pill.top) as f32;
+        if flash {
+            // Recién copiado: la cápsula llena y un tilde.
+            flyout::fill_round_argb(g, &pill, ph / 2.0, crate::glass::argb(faded(ink, body), 255));
+            let s = ph * 0.62;
+            let (x, y) = (w as f32 / 2.0 - s / 2.0, pill.top as f32 + (ph - s) / 2.0);
+            let mut pen: *mut GpPen = null_mut();
+            GdipCreatePen1(crate::note::colorref_to_argb(body), (s / 6.0).max(1.5), UnitPixel, &mut pen);
+            GdipSetPenLineCap197819(pen, LineCapRound, LineCapRound, DashCapFlat);
+            GdipSetPenLineJoin(pen, LineJoinRound);
+            let pts = [PointF { X: x + s * 0.18, Y: y + s * 0.52 }, PointF { X: x + s * 0.42, Y: y + s * 0.76 }, PointF { X: x + s * 0.84, Y: y + s * 0.28 }];
+            GdipDrawLines(g, pen, pts.as_ptr(), 3);
+            GdipDeletePen(pen);
+            return;
+        }
+        flyout::fill_round_argb(g, &pill, ph / 2.0, crate::glass::argb(faded(ink, body), 70));
+        let dot = (em as f32 / 7.0).max(2.0);
+        let step = dot * 2.2;
+        let n = ((w as f32 - ph * 0.6) / step).floor().max(1.0) as i32;
+        let x0 = (w as f32 - (n as f32 - 1.0) * step - dot) / 2.0;
+        dots(g, x0, pill.top as f32 + (ph - dot) / 2.0, dot, step, n, 230);
+    });
+    c.blit(hdc, r.left, r.top);
 }
 
 /// Una nota vacía no es un rectángulo en blanco: muestra en gris qué va
@@ -1494,6 +1812,10 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
             r
         }
         WM_ERASEBKGND => 1,
+        // No se le pasan: la nota se ve igual en todos los monitores (ver
+        // `note::note_dpi`) y el RichEdit queda al ppp del sistema. Con el
+        // aviso se acomodaba solo al ppp nuevo y agrandaba los márgenes.
+        WM_DPICHANGED_BEFOREPARENT | WM_DPICHANGED_AFTERPARENT => 0,
         WM_KEYUP | WM_IME_CHAR | WM_IME_COMPOSITION | WM_UNDO | WM_CUT | WM_CLEAR => {
             let r = DefSubclassProc(edit, msg, wparam, lparam);
             paint_overlay(edit);
@@ -1509,7 +1831,10 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
             // Pegar con el teclado pasa por `on_paste` (el RichEdit lo
             // resuelve por dentro, sin mandarse WM_PASTE).
             let paste = (ctrl() && !alt && !shift && vk == 0x56) || (shift && !ctrl() && !alt && vk == VK_INSERT);
-            let handled = if locked(edit) {
+            let copy = ctrl() && !alt && !shift && (vk == 0x43 || vk == VK_INSERT);
+            let handled = if copy && copy_secret(edit) {
+                true
+            } else if locked(edit) {
                 false // solo lectura: lo resuelve el RichEdit (moverse, copiar)
             } else if paste {
                 SendMessageW(edit, WM_PASTE, 0, 0);
@@ -1531,6 +1856,7 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
                     VK_RETURN => Some('\r' as u16),
                     VK_BACK => Some(8),
                     0x56 => Some(0x16), // Ctrl+V
+                    0x43 => Some(0x03), // Ctrl+C
                     _ => None,
                 };
                 with_state(edit, |s| s.swallow = swallow);
@@ -1563,6 +1889,12 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
             }
             0
         }
+        WM_TIMER if wparam == TIMER_COPIED => {
+            KillTimer(edit, TIMER_COPIED);
+            with_state(edit, |s| s.copied = None);
+            InvalidateRect(edit, null(), 0);
+            0
+        }
         WM_TIMER if wparam == TIMER_REFRESH => {
             KillTimer(edit, TIMER_REFRESH);
             refresh(edit);
@@ -1585,6 +1917,16 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
                 paint_overlay(edit);
                 return 0;
             }
+            // Clic en lo oculto: se muestra o se vuelve a tapar. Arrastrando,
+            // se selecciona como siempre.
+            if let Some(i) = secret_at(edit, x, y) {
+                let mut pt = POINT { x, y };
+                ClientToScreen(edit, &mut pt);
+                if DragDetect(edit, pt) == 0 {
+                    toggle_reveal(edit, i);
+                    return 0;
+                }
+            }
             if let Some(a) = checkbox_at(edit, x, y).filter(|_| !locked(edit)) {
                 SetFocus(edit);
                 toggle_todo(edit, a);
@@ -1600,7 +1942,7 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
                 SetCursor(LoadCursorW(null_mut(), IDC_ARROW));
                 return 1;
             }
-            if (lparam & 0xffff) as u32 == HTCLIENT && !locked(edit) && checkbox_at(edit, p.x, p.y).is_some() {
+            if (lparam & 0xffff) as u32 == HTCLIENT && ((!locked(edit) && checkbox_at(edit, p.x, p.y).is_some()) || secret_at(edit, p.x, p.y).is_some()) {
                 SetCursor(LoadCursorW(null_mut(), IDC_HAND));
                 return 1;
             }
@@ -1679,6 +2021,21 @@ unsafe extern "system" fn subclass_proc(edit: HWND, msg: u32, wparam: WPARAM, lp
                 Some(POINT { x: (lparam & 0xffff) as i16 as i32, y: ((lparam >> 16) & 0xffff) as i16 as i32 })
             };
             show_menu(edit, p);
+            0
+        }
+        // Clic derecho sobre texto oculto: lo copia directo, sin menú, sin
+        // destaparlo y sin mover el cursor; la cápsula destella para avisar.
+        WM_RBUTTONDOWN | WM_RBUTTONUP if secret_at(edit, (lparam & 0xffff) as i16 as i32, ((lparam >> 16) & 0xffff) as i16 as i32).is_some() => {
+            if msg == WM_RBUTTONDOWN {
+                let i = secret_at(edit, (lparam & 0xffff) as i16 as i32, ((lparam >> 16) & 0xffff) as i16 as i32).unwrap_or(0);
+                if let Some((a, b, _)) = with_state(edit, |s| s.secrets.get(i).copied()).flatten() {
+                    crate::seltool::hide_for(edit);
+                    copy_units(edit, a, b);
+                    with_state(edit, |s| s.copied = Some(i));
+                    InvalidateRect(edit, null(), 0);
+                    SetTimer(edit, TIMER_COPIED, 900, None);
+                }
+            }
             0
         }
         WM_SETFOCUS | WM_KILLFOCUS => {

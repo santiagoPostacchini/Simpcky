@@ -1,5 +1,18 @@
 # Decisiones de arquitectura
 
+## Texto oculto y notas fuera de las capturas (2026-10-30)
+
+**Contexto.** Hay quien guarda claves en las notas: que no se lean por encima del hombro ni al compartir pantalla (Teams, Discord, OBS…), sin depender de la aplicación que captura.
+
+**Decisión.**
+- **Texto oculto** como un estilo más (`h` en `fmt`, `richtext::SECRET`). En el RichEdit se marca con `bAnimation` (el RichEdit lo guarda y lo hereda al escribir como la negrita, pero no lo dibuja; probado). Tapado, la tinta es del color del fondo y encima se dibuja la cápsula, en el mismo lienzo que el texto: lo real no llega a la pantalla aunque la cápsula se atrase. Mostrarlo no se guarda ni se puede deshacer, y se vuelve a tapar al enrollar o cerrar la nota.
+- **Fuera de las capturas** con `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`. Windows lo niega a las ventanas hijas (error 87, probado), y una nota anclada es hija del escritorio. Las privadas (con texto oculto, o todas si se eligió en Configuración) usan lo que ya existía para el modo vidrio: ventana de primer nivel poseída por el escritorio (`desktop::own`), que queda detrás de las aplicaciones y se ve con "Mostrar escritorio". `note::keep_on_desktop` decide anclada o poseída para cada nota.
+- **Escala del texto.** El RichEdit dibuja al ppp del sistema, no al de su ventana, y solo se acomoda con el aviso de cambio de ppp, que llega al cambiar de monitor pero no al anclarse, y que además agranda los márgenes (medido). Una nota de primer nivel en un monitor con otra escala tenía encabezado a 150 % y texto a 100 %. Ahora la nota entera se dibuja al ppp del sistema en cualquier monitor (`note::note_dpi`, como siempre hicieron las ancladas), no cambia de tamaño con `WM_DPICHANGED` y el RichEdit no recibe esos avisos: una nota mide y se ve igual en los dos monitores, y la cuadrícula usa la misma escala (pedido del usuario: "mantener el tamaño entre monitores"). `desktop::detach` conserva el tamaño: el aviso de ppp en el medio de `SetParent` la agrandaba cada vez.
+
+**Límites conocidos.** No es un mecanismo de seguridad (Microsoft lo aclara): no cubre el escritorio remoto, la "captura de juego" de OBS ni una foto. El texto oculto viaja tal cual a Drive y queda en `notes.json` sin cifrar (el cifrado es otra tarea). Las ancladas en un monitor con otra escala siguen al ppp del principal (hallazgo anterior).
+
+**Cómo verificar.** Instancia de prueba con dos notas en el monitor 2, una con `fmt` `h…`: en una captura solo aparece la otra, y `GetWindowDisplayAffinity` da `0x11`. Para ver el dibujo hace falta un ejecutable aparte sin la exclusión (`PrintWindow` también devuelve negro).
+
 ## Celdas y pilas (2026-10-29)
 
 **Contexto.** Acomodar notas rápido: arrastrarlas a celdas de tamaño de nota, y apilar notas enrolladas una debajo de otra, como ya se hacía a mano. Se diseñó con un boceto interactivo antes de tocar la app.

@@ -110,13 +110,16 @@ pub fn paragraphs(text: &[u16]) -> Vec<(usize, usize)> {
 // Estilos
 // -----------------------------------------------------------------
 
-/// Negrita, cursiva, subrayado, tachado — en ese orden en todos lados.
-pub const STYLES: usize = 4;
-const LETTERS: [char; STYLES] = ['b', 'i', 'u', 's'];
+/// Negrita, cursiva, subrayado, tachado y oculto — en ese orden en todos lados.
+pub const STYLES: usize = 5;
+const LETTERS: [char; STYLES] = ['b', 'i', 'u', 's', 'h'];
 pub const BOLD: usize = 0;
 pub const ITALIC: usize = 1;
 pub const UNDERLINE: usize = 2;
 pub const STRIKE: usize = 3;
+/// Texto oculto (claves): tapado hasta que se le hace clic, y fuera de
+/// las vistas previas y de la búsqueda (ver `visible_text`).
+pub const SECRET: usize = 4;
 
 /// Tramos (inicio, largo) de cada estilo, ordenados y sin solaparse.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
@@ -200,6 +203,26 @@ pub fn styles_from_str(s: &str, text_len: u32) -> Styles {
     }
     st.normalize(text_len);
     st
+}
+
+/// El texto con cada tramo oculto cambiado por `••••` (siempre cuatro: no
+/// deja ver el largo). Para todo lo que muestra o busca texto fuera de la
+/// nota: título, vistas previas, búsqueda.
+pub fn visible_text(text: &str, fmt: &str) -> String {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let secret = &styles_from_str(fmt, units.len() as u32).spans[SECRET];
+    if secret.is_empty() {
+        return text.to_string();
+    }
+    let mut out = Vec::with_capacity(units.len());
+    let mut at = 0usize;
+    for &(s, l) in secret {
+        out.extend_from_slice(&units[at..s as usize]);
+        out.extend("••••".encode_utf16());
+        at = (s + l) as usize;
+    }
+    out.extend_from_slice(&units[at..]);
+    String::from_utf16_lossy(&out)
 }
 
 pub fn utf16_len(s: &str) -> u32 {
@@ -324,6 +347,15 @@ mod tests {
 
     fn w(s: &str) -> Vec<u16> {
         s.encode_utf16().collect()
+    }
+
+    #[test]
+    fn lo_oculto_no_se_ve_ni_se_busca() {
+        assert_eq!(visible_text("clave: hunter2 listo", "h7+7"), "clave: •••• listo");
+        assert_eq!(visible_text("a😀b secreta", "b0+1 h5+7"), "a😀b ••••");
+        assert_eq!(visible_text("sin nada", "b0+3"), "sin nada");
+        let st = styles_from_str("h3+2 b0+1", 10);
+        assert_eq!(styles_to_string(&st), "b0+1 h3+2");
     }
 
     #[test]

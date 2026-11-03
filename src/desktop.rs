@@ -256,7 +256,10 @@ pub fn detach(hwnd: HWND) {
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (ex & !WS_EX_LAYERED) as isize);
         let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
         SetWindowLongPtrW(hwnd, GWL_STYLE, (style & !WS_CHILD) as isize);
-        SetWindowPos(hwnd, HWND_TOP, rect.left, rect.top, 0, 0, SWP_NOSIZE | SWP_FRAMECHANGED);
+        // Con su tamaño también: al soltarla en un monitor con otra escala,
+        // Windows la agranda en el medio de SetParent (WM_DPICHANGED), y
+        // cada vez que se anclaba y se soltaba crecía un poco más.
+        SetWindowPos(hwnd, HWND_TOP, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, SWP_FRAMECHANGED);
         repaint_all(hwnd);
     }
 }

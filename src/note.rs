@@ -14,8 +14,8 @@ use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::Graphics::GdiPlus::*;
 use windows_sys::Win32::UI::Controls::{TOOLTIPS_CLASSW, TTF_SUBCLASS, TTM_ADDTOOLW, TTM_NEWTOOLRECTW, TTS_ALWAYSTIP, TTS_NOPREFIX, TTTOOLINFOW};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    DragDetect, GetCapture, GetFocus, GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_F2, VK_MENU, VK_OEM_COMMA, VK_OEM_PERIOD, VK_OEM_PLUS,
-    VK_SHIFT,
+    DragDetect, GetAsyncKeyState, GetCapture, GetDoubleClickTime, GetFocus, GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_F2, VK_MENU, VK_OEM_COMMA, VK_OEM_PERIOD, VK_OEM_PLUS,
+    VK_LBUTTON, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -35,6 +35,8 @@ const TIMER_HOVER: usize = 1;
 const TIMER_AUTOSAVE: usize = 2;
 const TIMER_DESKTOP_WATCH: usize = 3;
 const HOVER_POLL_MS: u32 = 150;
+/// Cuánto se puede alejar el mouse de una nota abierta en Auto sin que se enrolle (a 100 %).
+const KEEP_OPEN_MARGIN: i32 = 40;
 /// Mientras el mouse está sobre la nota: cuándo se fue (y hay que
 /// esconder los botones del encabezado).
 const TIMER_HOT: usize = 6;
@@ -282,9 +284,12 @@ pub fn set_scale(level: u8) {
     recreate_all();
 }
 
-/// El ppp con el que se dibuja la nota: el del monitor, por la escala.
-pub fn note_dpi(hwnd: HWND) -> i32 {
-    let dpi = unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd) }.max(96) as i32;
+/// El ppp con el que se dibuja la nota: el del sistema (el monitor
+/// principal) por la escala elegida, en cualquier monitor. Una nota mide y
+/// se ve igual al pasar de un monitor a otro, anclada o no (las ancladas
+/// siempre siguieron al sistema).
+pub fn note_dpi(_hwnd: HWND) -> i32 {
+    let dpi = unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForSystem() }.max(96) as i32;
     dpi * scale_pct() / 100
 }
 
@@ -354,7 +359,7 @@ pub fn first_line(text: &str) -> String {
 pub fn display_title(data: &NoteData) -> String {
     let t = data.title.trim();
     if t.is_empty() {
-        first_line(&data.text)
+        first_line(&crate::richtext::visible_text(&data.text, &data.fmt))
     } else {
         t.to_string()
     }
@@ -513,6 +518,8 @@ struct HeaderState {
     /// Modo Auto: desde cuándo el mouse está fuera de la nota desenrollada
     /// (ver `handle_hover_tick`). Vuelve a `None` apenas el mouse vuelve.
     away_since: Option<std::time::Instant>,
+    /// Cuándo un clic en la barra la enrolló o desenrolló (si llega el doble clic, se deshace).
+    toggled_at: Option<std::time::Instant>,
 }
 
 thread_local! {
@@ -531,11 +538,10 @@ fn has_focus(hwnd: HWND) -> bool {
 fn layout_of(hwnd: HWND) -> HeaderLayout {
     let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
     unsafe { GetClientRect(hwnd, &mut rc) };
-    let id = note_id(hwnd);
-    let auto = app().lock().unwrap().notes.get(&id).is_some_and(|nr| nr.data.roll_mode == RollMode::Auto);
     let hover = header_state(hwnd, |s| s.hover);
     let buttons = hover || has_focus(hwnd) || crate::rename::is_renaming(hwnd);
-    HeaderLayout::new(rc.right, buttons, !auto, px(hwnd, 96), crate::app::save_failing(), is_locked(hwnd))
+    // Sin el botón de enrollar: en Manual, un clic en la barra (`on_bar_click`).
+    HeaderLayout::new(rc.right, buttons, false, px(hwnd, 96), crate::app::save_failing(), is_locked(hwnd))
 }
 
 /// Repinta el encabezado de todas las notas (cambió algo que muestran
@@ -849,6 +855,8 @@ fn apply_rolled_state(hwnd: HWND, edit: HWND, w: i32, full_h: i32, rolled: bool)
     let new_h = if rolled { header_h(hwnd) } else { full_h };
     if rolled {
         crate::seltool::hide_for(edit);
+        // Lo que se había mostrado se vuelve a tapar.
+        crate::editor::hide_all_secrets(edit);
     } else if !edit.is_null() {
         let rc = edit_rect(hwnd, w, full_h);
         unsafe {
@@ -937,11 +945,22 @@ fn handle_hover_tick(hwnd: HWND) {
     if crate::snap::hush(hwnd, hovered) {
         return;
     }
+    // Abierta, se queda abierta con el mouse cerca (no encima de otra nota),
+    // mientras se selecciona texto o con su menú abierto: así se puede copiar.
+    let keep = hovered
+        || (!pile_ctrl && {
+            let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            unsafe { GetWindowRect(hwnd, &mut rc) };
+            let m = px(hwnd, KEEP_OPEN_MARGIN);
+            let near = pt.x >= rc.left - m && pt.x < rc.right + m && pt.y >= rc.top - m && pt.y < rc.bottom + m;
+            let selecting = has_focus(hwnd) && unsafe { GetAsyncKeyState(VK_LBUTTON as i32) } < 0;
+            (near && owning_note(under).is_null()) || selecting || crate::flyout::is_open_for(hwnd)
+        });
     let id = note_id(hwnd);
     // La espera elegida en Configuración: el mouse tiene que estar afuera
     // todo ese tiempo seguido; si vuelve antes, la cuenta empieza de nuevo.
     let away = header_state(hwnd, |s| {
-        if hovered {
+        if keep {
             s.away_since = None;
         }
         s.away_since.get_or_insert_with(std::time::Instant::now).elapsed()
@@ -956,7 +975,7 @@ fn handle_hover_tick(hwnd: HWND) {
                 nr.data.rolled = false;
                 Some((false, nr.data.w, nr.data.h, nr.edit as HWND))
             }
-            Some(nr) if nr.data.roll_mode == RollMode::Auto && !hovered && waited && !nr.data.rolled => {
+            Some(nr) if nr.data.roll_mode == RollMode::Auto && !keep && waited && !nr.data.rolled => {
                 nr.data.rolled = true;
                 Some((true, nr.data.w, nr.data.h, nr.edit as HWND))
             }
@@ -1164,11 +1183,12 @@ fn switch_layer_window(hwnd: HWND, to_top: bool) {
             }
             KillTimer(hwnd, TIMER_DESKTOP_WATCH);
             KillTimer(hwnd, TIMER_PEEK_END);
-            if crate::glass::active() {
+            if GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & WS_CHILD == 0 {
                 crate::desktop::disown(hwnd);
             } else {
                 crate::desktop::detach(hwnd);
             }
+            apply_capture(hwnd);
             SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
         } else {
             // Si se la está usando, no se va de golpe al escritorio: se
@@ -1282,24 +1302,108 @@ fn anchor_widget(hwnd: HWND) {
     let restore = {
         let mut a = app().lock().unwrap();
         a.notes.get_mut(&id).and_then(|nr| {
-            let restore = nr.peeking.then_some((nr.data.x, nr.data.y, nr.data.w));
+            let restore = nr.peeking.then_some((nr.data.x, nr.data.y, nr.data.w, nr.data.h, nr.data.rolled));
             nr.peeking = false;
             restore
         })
     };
-    if let Some((x, y, w)) = restore {
-        // Vuelve al lugar guardado, sin corregir el dato por este monitor.
+    if let Some((x, y, w, h, rolled)) = restore {
+        // Vuelve al lugar y al tamaño guardados, sin corregir el dato por este monitor.
         let (x, y) = clamp_to_work_area(x, y, w, header_h(hwnd));
+        let h = if rolled { header_h(hwnd) } else { h };
+        unsafe { SetWindowPos(hwnd, null_mut(), 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) };
         crate::desktop::move_to_screen(hwnd, x, y);
     }
     unsafe {
         KillTimer(hwnd, TIMER_PEEK_END);
-        if crate::glass::active() {
+        if owned(hwnd) {
             crate::desktop::own(hwnd);
+            apply_capture(hwnd);
         } else {
+            apply_capture(hwnd);
             crate::desktop::anchor(hwnd);
         }
         SetTimer(hwnd, TIMER_DESKTOP_WATCH, DESKTOP_WATCH_MS, None);
+    }
+}
+
+// -----------------------------------------------------------------
+// Fuera de las capturas de pantalla
+// -----------------------------------------------------------------
+
+/// ¿Fuera de las capturas de pantalla (Teams, Discord, OBS…)? Las que
+/// tienen texto oculto siempre; todas, si así se eligió (`all`).
+fn is_private(nr: &crate::app::NoteRuntime, all: bool) -> bool {
+    all || editor::has_secrets(nr.edit as HWND)
+}
+
+/// Widget de escritorio de primer nivel, poseído por el escritorio
+/// (`desktop::own`), en vez de hijo. En vidrio, porque el mod de Windhawk
+/// solo mira ventanas de primer nivel; las privadas, porque Windows solo
+/// saca de las capturas a las de primer nivel (a una hija se lo niega).
+fn owned_nr(nr: &crate::app::NoteRuntime, all: bool) -> bool {
+    crate::glass::active() || is_private(nr, all)
+}
+
+fn owned(hwnd: HWND) -> bool {
+    let a = app().lock().unwrap();
+    let all = a.settings.hide_capture;
+    a.notes.get(&note_id(hwnd)).is_some_and(|nr| owned_nr(nr, all))
+}
+
+/// Pide a Windows que la nota no salga (o que salga) en las capturas.
+/// Una anclada (hija) no se puede excluir, pero una privada nunca se ancla.
+fn apply_capture(hwnd: HWND) {
+    let private = {
+        let a = app().lock().unwrap();
+        let all = a.settings.hide_capture;
+        a.notes.get(&note_id(hwnd)).is_some_and(|nr| is_private(nr, all))
+    };
+    unsafe { SetWindowDisplayAffinity(hwnd, if private { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE }) };
+}
+
+/// Una ventana de la app que muestra notas (el selector, "Todas las
+/// notas"): fuera de las capturas si así se eligió.
+pub fn exclude_if_chosen(hwnd: HWND) {
+    if !hwnd.is_null() && app().lock().unwrap().settings.hide_capture {
+        unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) };
+    } else if !hwnd.is_null() {
+        unsafe { SetWindowDisplayAffinity(hwnd, WDA_NONE) };
+    }
+}
+
+/// Cambió si la nota es privada (se ocultó texto, se borró lo oculto, se
+/// cambió el ajuste): poseída o anclada según corresponda, y fuera o
+/// dentro de las capturas.
+pub fn update_privacy(hwnd: HWND) {
+    keep_on_desktop(hwnd);
+    apply_capture(hwnd);
+    settle_widgets();
+}
+
+pub fn update_privacy_all() {
+    let list: Vec<HWND> = app().lock().unwrap().notes.values().map(|nr| nr.hwnd as HWND).filter(|h| !h.is_null()).collect();
+    for h in list {
+        update_privacy(h);
+    }
+}
+
+/// Un widget de escritorio sigue en su lugar: poseído o anclado según
+/// corresponda (Explorer se reinició, cambió si es privada…). No toca nada
+/// si ya está bien: rehacerlo le corta el foco al texto.
+fn keep_on_desktop(hwnd: HWND) {
+    let layer_top = app().lock().unwrap().notes.get(&note_id(hwnd)).is_some_and(|nr| nr.data.layer == Layer::AlwaysOnTop);
+    if layer_top || is_peeking(hwnd) {
+        return;
+    }
+    if owned(hwnd) {
+        if !crate::desktop::is_owned(hwnd) {
+            crate::desktop::own(hwnd);
+            apply_capture(hwnd);
+        }
+    } else if !crate::desktop::is_anchored(hwnd) {
+        apply_capture(hwnd);
+        crate::desktop::anchor(hwnd);
     }
 }
 
@@ -1556,10 +1660,11 @@ pub fn open_note(hwnd: HWND, at_cursor: bool) {
                     nr.peeking = true;
                 }
             }
-            // En vidrio ya es de primer nivel: asomarse es solo pasar
-            // adelante (ver WM_WINDOWPOSCHANGING).
-            if !crate::glass::active() {
+            // Poseída ya es de primer nivel: asomarse es solo pasar adelante
+            // (ver WM_WINDOWPOSCHANGING).
+            if GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & WS_CHILD != 0 {
                 crate::desktop::detach(hwnd);
+                apply_capture(hwnd);
             }
             if at_cursor {
                 let mut pt = POINT { x: 0, y: 0 };
@@ -1806,6 +1911,8 @@ fn on_create(hwnd: HWND) {
         // la nota no se pierde: queda como ventana suelta y el
         // vigilante reintenta solo.
         anchor_widget(hwnd);
+    } else {
+        apply_capture(hwnd);
     }
 }
 
@@ -1987,20 +2094,19 @@ unsafe fn paint_glass_header(
 /// Modo vidrio y widget de escritorio (no siempre encima, no asomada):
 /// su lugar es justo encima del escritorio, debajo de las aplicaciones.
 fn glass_widget(hwnd: HWND) -> bool {
-    if !crate::glass::active() {
-        return false;
-    }
-    let id = note_id(hwnd);
-    app().lock().unwrap().notes.get(&id).is_some_and(|nr| nr.data.layer != Layer::AlwaysOnTop && !nr.peeking)
+    let a = app().lock().unwrap();
+    let all = a.settings.hide_capture;
+    a.notes.get(&note_id(hwnd)).is_some_and(|nr| owned_nr(nr, all) && nr.data.layer != Layer::AlwaysOnTop && !nr.peeking)
 }
 
 /// Los widgets en modo vidrio (menos `except`), de arriba hacia abajo.
 fn widgets_top_down(except: HWND) -> Vec<HWND> {
     let set: Vec<HWND> = {
         let a = app().lock().unwrap();
+        let all = a.settings.hide_capture;
         a.notes
             .values()
-            .filter(|nr| nr.hwnd != 0 && nr.hwnd != except as isize && nr.data.layer != Layer::AlwaysOnTop && !nr.peeking)
+            .filter(|nr| nr.hwnd != 0 && nr.hwnd != except as isize && nr.data.layer != Layer::AlwaysOnTop && !nr.peeking && owned_nr(nr, all))
             .map(|nr| nr.hwnd as HWND)
             .collect()
     };
@@ -2084,9 +2190,6 @@ thread_local! {
 /// ventanas "poseídas" por el escritorio (las notas, y hasta una ventana
 /// suya del IME), y quedaban todas adelante de las aplicaciones.
 fn settle_widgets_with(first: HWND) {
-    if !crate::glass::active() {
-        return;
-    }
     let host = crate::desktop::find_host();
     let first = (!first.is_null() && glass_widget(first)).then_some(first);
     for h in first.into_iter().chain(widgets_top_down(first.unwrap_or(null_mut()))) {
@@ -2161,13 +2264,15 @@ pub(crate) fn on_move_end(hwnd: HWND, resized: bool) {
     {
         let mut a = app().lock().unwrap();
         if let Some(nr) = a.notes.get_mut(&id) {
+            // Asomada, cambiarle el tamaño es para usarla ahora: al volver
+            // queda como estaba (en su pila, si estaba en una).
             if !(resized && nr.peeking) {
                 nr.data.x = rc.left;
                 nr.data.y = rc.top;
-            }
-            nr.data.w = (rc.right - rc.left).max(px(hwnd, MIN_W));
-            if !nr.data.rolled {
-                nr.data.h = (rc.bottom - rc.top).max(header_h(hwnd) + px(hwnd, 80));
+                nr.data.w = (rc.right - rc.left).max(px(hwnd, MIN_W));
+                if !nr.data.rolled {
+                    nr.data.h = (rc.bottom - rc.top).max(header_h(hwnd) + px(hwnd, 80));
+                }
             }
         }
     }
@@ -2237,8 +2342,17 @@ fn on_dblclick(hwnd: HWND, lparam: LPARAM) {
     let x = (lparam & 0xffff) as i16 as i32;
     let y = ((lparam >> 16) & 0xffff) as i16 as i32;
     if layout_of(hwnd).hit(x, y) == Hit::Bar && !is_locked(hwnd) {
+        // El primer clic del doble la enrolló o desenrolló: se deshace.
+        let undo = header_state(hwnd, |s| s.toggled_at.take()).is_some_and(|t| t.elapsed().as_millis() <= unsafe { GetDoubleClickTime() } as u128);
+        if undo {
+            toggle_roll_manual(hwnd);
+        }
         crate::rename::begin(hwnd);
     }
+}
+
+fn is_manual(hwnd: HWND) -> bool {
+    app().lock().unwrap().notes.get(&note_id(hwnd)).is_some_and(|nr| nr.data.roll_mode == RollMode::Manual)
 }
 
 /// Franja de los bordes que cambia el tamaño (a 100 %), y cuánto de
@@ -2579,6 +2693,7 @@ pub fn handle_shortcut(target: HWND, vk: u32, repeat: bool) -> bool {
             (b'U', false) => Some(Action::Style(crate::richtext::UNDERLINE)),
             // Como en las Sticky Notes de Microsoft.
             (b'T', false) => Some(Action::Style(crate::richtext::STRIKE)),
+            (b'H', false) => Some(Action::Style(crate::richtext::SECRET)),
             (b'L', true) => Some(Action::Bullets),
             (b'C', true) => Some(Action::Todos),
             (b'E' | b'J' | b'L' | b'1' | b'2' | b'5', _) => Some(Action::Swallow),
@@ -2654,6 +2769,10 @@ fn on_bar_click(hwnd: HWND, x: i32, y: i32) {
             crate::snap::begin_move(hwnd, x, y);
         } else if pile_click {
             crate::snap::make_pile(hwnd);
+        } else if is_manual(hwnd) {
+            // En Manual, un clic en la barra la enrolla o la desenrolla.
+            toggle_roll_manual(hwnd);
+            header_state(hwnd, |s| s.toggled_at = Some(std::time::Instant::now()));
         } else {
             // Un clic en la barra de una nota en la que se estaba
             // escribiendo: el foco vuelve al texto.
@@ -2733,17 +2852,7 @@ fn on_timer(hwnd: HWND, wparam: WPARAM) {
             // tocar nada). Ahora solo toca algo si de verdad se
             // desancló (por ejemplo, `explorer.exe` se reinició) — y
             // nunca mientras la nota está "asomada" al frente.
-            let layer_top = {
-                let id = note_id(hwnd);
-                app().lock().unwrap().notes.get(&id).is_some_and(|nr| nr.data.layer == Layer::AlwaysOnTop)
-            };
-            if crate::glass::active() {
-                if !layer_top && !is_peeking(hwnd) && !crate::desktop::is_owned(hwnd) {
-                    crate::desktop::own(hwnd);
-                }
-            } else if !is_peeking(hwnd) && !crate::desktop::is_anchored(hwnd) {
-                crate::desktop::anchor(hwnd);
-            }
+            keep_on_desktop(hwnd);
             rescue_offscreen(hwnd);
             // ¿Se prendió o se apagó el mod de Windhawk?
             crate::tray::check_glass_soon();
@@ -2771,6 +2880,8 @@ fn on_timer(hwnd: HWND, wparam: WPARAM) {
         TIMER_AUTOSAVE => {
             unsafe { KillTimer(hwnd, TIMER_AUTOSAVE) };
             commit_text_and_save(hwnd);
+            // Se pudo borrar (o deshacer) el texto oculto.
+            update_privacy(hwnd);
         }
         TIMER_HOT => hot_tick(hwnd),
         TIMER_SETTLE => {
@@ -2874,13 +2985,8 @@ pub unsafe extern "system" fn note_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM,
             on_timer(hwnd, wparam);
             0
         }
-        WM_DPICHANGED => {
-            let r = &*(lparam as *const RECT);
-            SetWindowPos(hwnd, null_mut(), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
-            crate::trace::rect("note_wndproc", hwnd, None);
-            InvalidateRect(hwnd, null(), 1);
-            0
-        }
+        // Otro monitor, otra escala: la nota no cambia de tamaño (ver `note_dpi`).
+        WM_DPICHANGED => 0,
         WM_EXITSIZEMOVE => {
             crate::snap::finish_size(hwnd);
             on_move_end(hwnd, wparam == 1);

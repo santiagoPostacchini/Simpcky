@@ -1,4 +1,4 @@
-//! Barra de formato al seleccionar: negrita, cursiva, subrayado y tachado
+//! Barra de formato al seleccionar: negrita, cursiva, subrayado, tachado y oculto
 //! arriba del texto recién seleccionado con el mouse. No se lleva el foco
 //! ni el mouse (el texto sigue seleccionado, se puede seguir escribiendo)
 //! y se va sola al escribir, hacer clic en otro lado, desplazar el texto
@@ -11,12 +11,12 @@ use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND};
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::Graphics::GdiPlus::*;
-use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::flyout;
-use crate::richtext::{BOLD, ITALIC, STRIKE, UNDERLINE};
+use crate::richtext::{BOLD, ITALIC, SECRET, STRIKE, UNDERLINE};
 use crate::theme;
 use crate::win::wide;
 
@@ -25,7 +25,7 @@ const CLASS_NAME: &str = "SimpckySelTool";
 const BTN: i32 = 30;
 const PAD: i32 = 4;
 const GAP: i32 = 2;
-const STYLES: [usize; 4] = [BOLD, ITALIC, UNDERLINE, STRIKE];
+const STYLES: [usize; 5] = [BOLD, ITALIC, UNDERLINE, STRIKE, SECRET];
 
 struct State {
     hwnd: isize,
@@ -33,10 +33,10 @@ struct State {
     edit: isize,
     hover: Option<usize>,
     dpi: i32,
-    active: [bool; 4],
+    active: [bool; 5],
 }
 
-static STATE: Mutex<State> = Mutex::new(State { hwnd: 0, edit: 0, hover: None, dpi: 96, active: [false; 4] });
+static STATE: Mutex<State> = Mutex::new(State { hwnd: 0, edit: 0, hover: None, dpi: 96, active: [false; 5] });
 
 pub fn register_class(hinstance: HINSTANCE) {
     unsafe {
@@ -64,7 +64,8 @@ fn px(dpi: i32, v: i32) -> i32 {
 }
 
 fn size(dpi: i32) -> (i32, i32) {
-    (px(dpi, PAD * 2 + BTN * 4 + GAP * 3), px(dpi, PAD * 2 + BTN))
+    let n = STYLES.len() as i32;
+    (px(dpi, PAD * 2 + BTN * n + GAP * (n - 1)), px(dpi, PAD * 2 + BTN))
 }
 
 /// El botón `k` (en coordenadas de la barra).
@@ -83,7 +84,7 @@ pub fn show_for(edit: HWND) {
     };
     let active = STYLES.map(|k| styles[k]);
     let note = unsafe { GetParent(edit) };
-    let dpi = unsafe { GetDpiForWindow(edit) }.max(96) as i32;
+    let dpi = unsafe { GetDpiForSystem() }.max(96) as i32;
     let (w, h) = size(dpi);
     let mut note_rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
     unsafe { GetWindowRect(note, &mut note_rc) };
@@ -174,7 +175,7 @@ pub fn is_over(w: HWND, note: HWND) -> bool {
 
 fn hit(x: i32, y: i32) -> Option<usize> {
     let dpi = STATE.lock().unwrap().dpi;
-    (0..4).find(|&k| {
+    (0..STYLES.len()).find(|&k| {
         let r = button(dpi, k);
         x >= r.left && x < r.right && y >= r.top && y < r.bottom
     })
@@ -208,6 +209,10 @@ fn on_paint(hwnd: HWND) {
                 flyout::fill_round(g, &r, px(dpi, 5) as f32, c.surface_hover);
             } else if hover == Some(k) {
                 flyout::fill_round(g, &r, px(dpi, 5) as f32, c.surface);
+            }
+            if style == SECRET {
+                flyout::draw_glyph(mem, flyout::icon_font(-px(dpi, 15)), crate::editor::SECRET_GLYPH, &r, c.text);
+                continue;
             }
             // Las mismas letras que el menú del clic derecho.
             let (weight, bits, face) = match style {
