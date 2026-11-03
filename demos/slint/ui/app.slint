@@ -1,0 +1,96 @@
+﻿
+export component Note inherits Window {
+    background: transparent;
+    default-font-family: "Segoe UI";
+    in property <color> header-color;
+    in property <color> body-color;
+    in property <color> ink-color;
+    in property <color> title-color;
+    in property <string> note-title;
+    title: root.note-title;
+    in-out property <string> text;
+    in property <bool> hovered;
+    in property <bool> pinned;
+    callback header-pressed(float, float, bool, bool);
+    callback text-changed(string);
+    callback new-note();
+    callback toggle-pin();
+    Rectangle {
+        background: transparent;
+        border-radius: 8px;
+        clip: true;
+        Rectangle {
+            x: 0px; y: 0px; width: parent.width; height: 40px;
+            background: root.header-color;
+            border-top-left-radius: 8px; border-top-right-radius: 8px;
+            border-bottom-left-radius: root.height <= 40px ? 8px : 0px;
+            border-bottom-right-radius: root.height <= 40px ? 8px : 0px;
+            Text {
+                y: 0px; x: 13px; width: parent.width - (root.hovered ? 91px : 26px);
+                height: 40px;
+                text: root.note-title; color: root.title-color;
+                font-size: 14px; font-weight: 600;
+                vertical-alignment: center; overflow: elide;
+            }
+            drag := TouchArea {
+                x: 0px; y: 0px; height: 40px;
+                width: parent.width - (root.hovered ? 78px : 0px);
+                pointer-event(event) => {
+                    if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                        root.header-pressed(self.mouse-x / 1px, self.mouse-y / 1px, event.modifiers.control, event.modifiers.shift);
+                    }
+                }
+            }
+            if root.hovered: Rectangle {
+                x: parent.width - 76px; y: 5px; width: 34px; height: 30px;
+                border-radius: 5px; background: add.has-hover ? #ffffff30 : transparent;
+                Text { text: "\u{E710}"; font-family: "Segoe Fluent Icons"; font-size: 14px; color: root.ink-color; horizontal-alignment: center; vertical-alignment: center; }
+                add := TouchArea { clicked => { root.new-note(); } }
+            }
+            if root.hovered: Rectangle {
+                x: parent.width - 40px; y: 5px; width: 34px; height: 30px;
+                border-radius: 5px; background: pin.has-hover ? #ffffff30 : transparent;
+                Text { text: root.pinned ? "\u{E840}" : "\u{E718}"; font-family: "Segoe Fluent Icons"; font-size: 14px; color: root.ink-color; horizontal-alignment: center; vertical-alignment: center; }
+                pin := TouchArea { clicked => { root.toggle-pin(); } }
+            }
+        }
+        Rectangle {
+            x: 0px; width: parent.width; y: 40px; height: max(0px, parent.height - 40px);
+            background: root.body-color;
+            border-bottom-left-radius: 8px; border-bottom-right-radius: 8px;
+        }
+        if root.height > 40px: Flickable {
+            x: 12px; y: 49px; width: parent.width - 24px; height: parent.height - 58px;
+            content-width: self.width;
+            content-height: max(self.height, input.preferred-height);
+            input := TextInput {
+                width: parent.width;
+                height: max(self.preferred-height, root.height - 58px);
+                text <=> root.text; font-size: 15px; color: root.ink-color;
+                wrap: word-wrap; single-line: false;
+                edited => { root.text-changed(self.text); }
+            }
+        }
+    }
+}
+export struct Shape {
+    x: float, y: float, w: float, h: float,
+    radius: float, fill: color, stroke: color, thickness: float,
+    label: string, ink: color,
+}
+export component Overlay inherits Window {
+    background: transparent;
+    default-font-family: "Segoe UI";
+    in property <[Shape]> shapes;
+    // Slint no tiene bordes punteados: usamos líneas finas del mismo color.
+    for s in root.shapes: Rectangle {
+        x: s.x * 1px; y: s.y * 1px; width: s.w * 1px; height: s.h * 1px;
+        border-radius: s.radius * 1px; background: s.fill;
+        border-color: s.stroke; border-width: s.thickness * 1px;
+        Text { text: s.label; color: s.ink; font-size: 13px; horizontal-alignment: center; vertical-alignment: bottom; }
+    }
+}
+
+
+
+

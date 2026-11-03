@@ -1,0 +1,14 @@
+[package]
+name = "simpcky-demo-common"
+version = "0.1.0"
+edition = "2021"
+description = "Lo compartido por las demos: celdas y pilas, transiciones, vidrio nativo y notas"
+publish = false
+
+[lib]
+name = "common"
+
+[dependencies]
+windows-sys = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

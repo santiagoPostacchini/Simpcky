@@ -1,0 +1,21 @@
+[package]
+name = "simpcky-slint"
+version = "0.1.0"
+edition = "2021"
+description = "Demo: Simpcky con Slint (renderizador por software) en ventanas Win32 propias"
+publish = false
+
+[[bin]]
+name = "simpcky-slint"
+path = "src/main.rs"
+
+[dependencies]
+common = { package = "simpcky-demo-common", path = "../common" }
+windows-sys = { workspace = true }
+serde_json = { workspace = true }
+# Sin backend de Slint (ni winit ni Skia): plataforma propia sobre Win32 y
+# el renderizador por software dibujando en un DIB.
+slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "renderer-software", "software-renderer-systemfonts"] }
+
+[build-dependencies]
+slint-build = "1.18"
