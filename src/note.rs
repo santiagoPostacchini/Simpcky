@@ -1677,11 +1677,14 @@ pub fn open_note(hwnd: HWND, at_cursor: bool) {
                     nr.peek_unrolled = unroll.is_some();
                 }
             }
-            // Poseída ya es de primer nivel: asomarse es solo pasar adelante
-            // (ver WM_WINDOWPOSCHANGING).
             if GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & WS_CHILD != 0 {
                 crate::desktop::detach(hwnd);
                 apply_capture(hwnd);
+            } else {
+                // Poseída por el escritorio (vidrio, privada): al activarla,
+                // Windows subía con ella a todas las demás notas. Mientras se
+                // asoma va suelta; `anchor_widget` la vuelve a poseer.
+                crate::desktop::disown(hwnd);
             }
             if at_cursor {
                 let mut pt = POINT { x: 0, y: 0 };
