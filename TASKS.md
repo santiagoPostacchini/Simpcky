@@ -47,16 +47,17 @@
   (la asomada), en tres corridas.
 - Hallazgo (sin arreglar): en un monitor a 150 % las notas enrolladas arrancan con 60 px de alto y
   `header_h` dice 40; al tocarlas pasan a 40. No pasa en el monitor principal (100 %).
-- Pendiente (usuario aprueba) — Lavado de cara para cohesión, ronda de depuración multiagente y Free/Plus:
+- Pendiente (usuario aprueba) — Lavado de cara para cohesión y ronda de depuración multiagente:
   plan en `docs/plan-lavado-de-cara.md` (inventario de 24 incoherencias, tokens, galería sin capturas,
   7 paquetes en paralelo para Codex y Sonnet). Aprobado el 4/11, con animaciones. La skill unslop está
   instalada en `.claude/skills/unslop/` (heydamir, CC BY 4.0, commit a6f121e). Su auditoría dio
   "slop liviano", así que se pule sin rediseñar. El plan suma el rumbo y el paquete H (movimiento).
   Decidido: acento de Windows, movimiento sobrio. `fix/asomar-sola` va a master para que Codex
   arranque con el árbol limpio.
-- Pendiente (usuario decide) — Free y Plus en Microsoft Store: plan en
-  `docs/plan-tienda-free-plus.md`. Antes de empezar: licencia del repo, el EXE de GitHub y qué va en
-  Plus.
+- Pendiente (usuario aprueba) — Simpcky gratis en Microsoft Store, como MSIX: plan en
+  `docs/plan-tienda.md`. Decidido el 4/11: sin versión paga, el repo sigue MIT, el EXE de GitHub
+  sigue igual. Ramas `feat/msix` (paquete) y `feat/msix-ajustes` (iniciar con Windows, menú del
+  escritorio, actualizador y datos dentro del paquete); la ficha la carga el usuario.
 - Claude — Imagen pegada debajo de una clave: heredaba el texto oculto y se le dibujaba la cápsula
   al costado. Una imagen nunca es oculta (al pegar, al guardar y al cargar; test `imagen_nunca_oculta`).
 - Claude — Con "Ocultar las notas al compartir pantalla" apagado, también salen las que tienen texto

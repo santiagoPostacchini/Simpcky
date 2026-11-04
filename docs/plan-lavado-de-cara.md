@@ -1,16 +1,15 @@
-# Plan: lavado de cara, ronda de depuración y Free/Plus
+# Plan: lavado de cara y ronda de depuración
 
 Estado: propuesta (3 de noviembre de 2026). Base: `master` en `0ed72df`.
-Orden: **0 → 1 → 2 → 3**. Free/Plus (4) va después, cuando esté decidida la licencia.
+Orden: **0 → 1 → 2 → 3**. La versión paga se descartó el 4/11: Simpcky sale gratis y completo
+en la tienda (ver `plan-tienda.md`).
 
 ## Decisiones tomadas
 
-- **Plus** = imágenes (16), mosaico en pilas (21), mover y juntar pilas (22), texto oculto (25),
-  invisible al compartir pantalla (26), cifrado local (27, en duda: ver 4), modo vidrio (30),
-  sincronización (31) y cifrado en Drive (32). El resto es Free.
-- **La página del Free** es la portada de GitHub Pages (`docs/index.html`). Se reemplaza por la de
-  Plus cuando exista la ficha en la tienda. Se quedan `privacidad.html` y `firma.html`, porque
-  Google, la tienda y SignPath piden esos enlaces.
+- **Sin versión paga** (4/11): todas las funciones quedan para todos.
+- **La página** sigue siendo la portada de GitHub Pages (`docs/index.html`), con el botón de la
+  tienda cuando exista la ficha. Se quedan `privacidad.html` y `firma.html`, porque Google, la
+  tienda y SignPath piden esos enlaces.
 
 ## Rumbo (auditoría con la skill unslop, 4/11)
 
@@ -204,21 +203,6 @@ superficies, usando la galería en lugar de capturas de pantalla.
 4. **Verificar.** Claude corre todo y el usuario prueba con el mouse real, que es lo que el guion
    no cubre. El merge lo decide el usuario.
 
-## 4. Free y Plus (cuando se decida la licencia)
+## 4. Microsoft Store
 
-- **Antes:** decidir la licencia. Con el repo MIT y público, cualquiera compila Plus; la
-  recomendación es un módulo privado para lo de Plus (ver `plan-tienda-free-plus.md`).
-- **Un solo lugar que decide:** `plus.rs` con `plus::has(Función)`. Al principio dice "sí" en las
-  compilaciones de desarrollo; después lo decide la licencia de la tienda.
-- **Sin Plus no se pierde nada:**
-  - El texto oculto que ya existe sigue tapado: nunca se destapa una clave por dejar de pagar.
-    Solo no se puede ocultar texto nuevo.
-  - Las imágenes se siguen viendo; no se pueden pegar nuevas.
-  - La sincronización se pausa sin borrar nada.
-  - Las pilas en mosaico se acomodan de a una por fila.
-  - Vidrio pasa a liso.
-- **Cifrado local (27):** la recomendación es dejarlo siempre activo. Pasarlo a Plus deja las
-  notas de Free (con sus claves) en texto plano en el disco, y descifrar lo que ya está cifrado
-  sería bajarle la seguridad a quien ya la tenía.
-- **La página:** la nueva portada con lo que trae Plus, el precio y el botón de la tienda; se
-  publica junto con la ficha.
+Va en `plan-tienda.md`. Las capturas de la ficha salen de la galería, después del paso 2.
