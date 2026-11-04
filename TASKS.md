@@ -40,8 +40,20 @@
   parpadeaban). Ahora vuelve enrollada (`NoteRuntime::peek_unrolled`). Reproducido y verificado con
   una instancia de prueba en vidrio; el guion acepta `abrir <título>`. El parpadeo en sí no se probó
   con el mouse real.
+- Claude — (rama `fix/asomar-sola`) Traer una nota al frente en modo vidrio subía también a todas las
+  demás: Windows sube juntas las ventanas poseídas por el escritorio al activar una. Ahora la asomada
+  deja de ser poseída mientras se asoma (`desktop::disown`) y `anchor_widget` la vuelve a poseer.
+  Reproducido con una instancia de prueba: antes 2 de 3 notas encima de la aplicación, ahora 1 de 3
+  (la asomada), en tres corridas.
 - Hallazgo (sin arreglar): en un monitor a 150 % las notas enrolladas arrancan con 60 px de alto y
   `header_h` dice 40; al tocarlas pasan a 40. No pasa en el monitor principal (100 %).
+- Pendiente (usuario aprueba) — Lavado de cara para cohesión, ronda de depuración multiagente y Free/Plus:
+  plan en `docs/plan-lavado-de-cara.md` (inventario de 24 incoherencias, tokens, galería sin capturas,
+  7 paquetes en paralelo para Codex y Sonnet). Aprobado el 4/11, con animaciones. La skill unslop está
+  instalada en `.claude/skills/unslop/` (heydamir, CC BY 4.0, commit a6f121e). Su auditoría dio
+  "slop liviano", así que se pule sin rediseñar. El plan suma el rumbo y el paquete H (movimiento).
+  Decidido: acento de Windows, movimiento sobrio. `fix/asomar-sola` va a master para que Codex
+  arranque con el árbol limpio.
 - Pendiente (usuario decide) — Free y Plus en Microsoft Store: plan en
   `docs/plan-tienda-free-plus.md`. Antes de empezar: licencia del repo, el EXE de GitHub y qué va en
   Plus.
