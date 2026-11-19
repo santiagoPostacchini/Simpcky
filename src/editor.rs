@@ -34,7 +34,7 @@ use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::Graphics::GdiPlus::*;
 use windows_sys::Win32::UI::Controls::{EM_CHARFROMPOS, EM_POSFROMCHAR, EM_SETREADONLY};
-use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
+use windows_sys::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
@@ -1664,9 +1664,10 @@ unsafe fn paint_buffered(edit: HWND) -> bool {
 /// en esa medida, así la barra queda del otro lado del borde, recortada.
 /// El RichEdit la sigue manejando (rueda, teclado, rangos); acá solo se
 /// dibuja una más fina encima.
-pub fn hidden_bar_width(_hwnd: HWND) -> i32 {
+pub fn hidden_bar_width(hwnd: HWND) -> i32 {
+    // Al ppp del monitor de la nota: con el del sistema, a 150 % asomaba una franja negra.
     unsafe {
-        windows_sys::Win32::UI::HiDpi::GetSystemMetricsForDpi(SM_CXVSCROLL, GetDpiForSystem().max(96))
+        windows_sys::Win32::UI::HiDpi::GetSystemMetricsForDpi(SM_CXVSCROLL, GetDpiForWindow(hwnd).max(96))
     }
 }
 

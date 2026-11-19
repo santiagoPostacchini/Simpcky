@@ -202,7 +202,7 @@ fn add_tray_icon(hwnd: HWND) {
         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         nid.uCallbackMessage = WM_TRAYICON;
         nid.hIcon = crate::icon::app_icon();
-        set_wide_buf(&mut nid.szTip, "Simpcky — notas adhesivas");
+        set_wide_buf(&mut nid.szTip, "Simpcky");
         // Si ya estaba (NIM_ADD falla), se actualiza.
         if Shell_NotifyIconW(NIM_ADD, &nid) == 0 {
             Shell_NotifyIconW(NIM_MODIFY, &nid);

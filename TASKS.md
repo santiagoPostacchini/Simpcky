@@ -54,6 +54,19 @@
   "slop liviano", así que se pule sin rediseñar. El plan suma el rumbo y el paquete H (movimiento).
   Decidido: acento de Windows, movimiento sobrio. `fix/asomar-sola` va a master para que Codex
   arranque con el árbol limpio.
+- Claude (rama `feat/msix`, sin commitear) — Franja negra de 9 px a la derecha de cada nota abierta en
+  un monitor al 150 %: `editor::hidden_bar_width` medía la barra con el ppp del sistema (100 %) y no
+  con el del monitor de la nota. Ahora usa `GetDpiForWindow`. Visto en las capturas de la tienda.
+- Hallazgo (sin arreglar): "Todas las notas" no atiende `WM_DPICHANGED`; al llevarla de un monitor
+  al 100 % a uno al 150 % queda chica.
+- Claude — Material de la tienda en `target/tienda/` (fuera de git): 4 capturas del monitor 2 con
+  notas inventadas, tráiler de 30 s y la ficha (`ficha.md`).
+- Claude (rama `feat/msix`) — Paquete MSIX: `packaging/msix/` (manifiesto, íconos, `armar.py` con
+  makeappx). `app::packaged()` (GetCurrentPackageFullName): en el paquete no se busca actualizar,
+  no se toca la clave Run ni el menú del escritorio, y Configuración y la bienvenida esconden esas
+  opciones. El inicio con Windows es un `StartupTask` prendido. El ícono de la bandeja dice solo
+  "Simpcky". Hallazgo: Windows no instala sin firma el .msix de una app (0x80073D2B); se prueba
+  subiéndolo a la tienda como privado. Falta: los datos de Partner Center en `armar.py`.
 - Pendiente (usuario aprueba) — Simpcky gratis en Microsoft Store, como MSIX: plan en
   `docs/plan-tienda.md`. Decidido el 4/11: sin versión paga, el repo sigue MIT, el EXE de GitHub
   sigue igual. Ramas `feat/msix` (paquete) y `feat/msix-ajustes` (iniciar con Windows, menú del

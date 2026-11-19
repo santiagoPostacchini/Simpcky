@@ -228,3 +228,15 @@ pub fn test_instance() -> Option<&'static str> {
 }
 
 pub fn is_test_instance() -> bool { test_instance().is_some() }
+
+/// ¿Corre instalada desde un paquete MSIX (la tienda)? Ahí el paquete
+/// maneja el inicio con Windows y las actualizaciones, y el registro de
+/// HKCU que escribe la app no lo ve nadie más.
+pub fn packaged() -> bool {
+    static P: OnceLock<bool> = OnceLock::new();
+    *P.get_or_init(|| {
+        let mut len = 0u32;
+        let r = unsafe { windows_sys::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName(&mut len, std::ptr::null_mut()) };
+        r != windows_sys::Win32::Foundation::APPMODEL_ERROR_NO_PACKAGE
+    })
+}

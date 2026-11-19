@@ -23,12 +23,11 @@ use crate::win::wide;
 
 const CLASS_NAME: &str = "SimpckyWelcome";
 const W: i32 = 460;
+/// Alto con las cuatro filas; `height()` resta las que no van.
 const H: i32 = 604;
 const PAD: i32 = 28;
 const ROW_H: i32 = 44;
 const ROWS_TOP: i32 = 186;
-const ROWS: i32 = 4;
-const CARD_TOP: i32 = ROWS_TOP + ROWS * ROW_H + 22;
 const CARD_H: i32 = 118;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -82,8 +81,8 @@ pub fn show() {
     let hinstance = { app().lock().unwrap().hinstance } as HINSTANCE;
     let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
     unsafe {
-        // Tamaño de ventana para que el área de cliente mida W×H.
-        let mut rc = RECT { left: 0, top: 0, right: W, bottom: H };
+        // Tamaño de ventana para que el área de cliente mida W×height().
+        let mut rc = RECT { left: 0, top: 0, right: W, bottom: height() };
         AdjustWindowRectEx(&mut rc, style, 0, WS_EX_APPWINDOW);
         let (ww, wh) = (rc.right - rc.left, rc.bottom - rc.top);
         // Centrada en el área de trabajo del monitor principal.
@@ -120,12 +119,31 @@ pub fn refresh() {
 // Layout
 // -----------------------------------------------------------------
 
+/// Las preferencias de la bienvenida. En la tienda queda solo el modo
+/// oscuro: el inicio con Windows lo maneja el paquete, el menú del
+/// escritorio no se puede registrar y actualiza la tienda.
+fn rows() -> &'static [Hit] {
+    if crate::app::packaged() {
+        &[Hit::Dark]
+    } else {
+        &[Hit::Autostart, Hit::DesktopMenu, Hit::Dark, Hit::AutoUpdate]
+    }
+}
+
+fn height() -> i32 {
+    H - (4 - rows().len() as i32) * ROW_H
+}
+
+fn card_top() -> i32 {
+    ROWS_TOP + rows().len() as i32 * ROW_H + 22
+}
+
 fn row_rect(i: i32) -> RECT {
     RECT { left: PAD, top: ROWS_TOP + i * ROW_H, right: W - PAD, bottom: ROWS_TOP + (i + 1) * ROW_H }
 }
 
 fn card_rect() -> RECT {
-    RECT { left: PAD, top: CARD_TOP, right: W - PAD, bottom: CARD_TOP + CARD_H }
+    RECT { left: PAD, top: card_top(), right: W - PAD, bottom: card_top() + CARD_H }
 }
 
 fn connect_rect() -> RECT {
@@ -134,11 +152,11 @@ fn connect_rect() -> RECT {
 }
 
 fn start_rect() -> RECT {
-    RECT { left: W - PAD - 132, top: H - PAD - 38, right: W - PAD, bottom: H - PAD }
+    RECT { left: W - PAD - 132, top: height() - PAD - 38, right: W - PAD, bottom: height() - PAD }
 }
 
 fn privacy_rect() -> RECT {
-    RECT { left: PAD, top: H - PAD - 30, right: PAD + 170, bottom: H - PAD - 8 }
+    RECT { left: PAD, top: height() - PAD - 30, right: PAD + 170, bottom: height() - PAD - 8 }
 }
 
 fn in_rect(r: &RECT, x: i32, y: i32) -> bool {
@@ -166,7 +184,7 @@ fn sync_view() -> SyncView {
 }
 
 fn hit_test(x: i32, y: i32) -> Hit {
-    for (i, hit) in [Hit::Autostart, Hit::DesktopMenu, Hit::Dark, Hit::AutoUpdate].into_iter().enumerate() {
+    for (i, &hit) in rows().iter().enumerate() {
         if in_rect(&row_rect(i as i32), x, y) {
             return hit;
         }
@@ -272,10 +290,10 @@ fn on_paint(hwnd: HWND) {
         let mut ps: PAINTSTRUCT = std::mem::zeroed();
         let hdc = BeginPaint(hwnd, &mut ps);
         let mem = CreateCompatibleDC(hdc);
-        let bmp = CreateCompatibleBitmap(hdc, W, H);
+        let bmp = CreateCompatibleBitmap(hdc, W, height());
         let old_bmp = SelectObject(mem, bmp as HGDIOBJ);
         let bg = CreateSolidBrush(c.window);
-        FillRect(mem, &RECT { left: 0, top: 0, right: W, bottom: H }, bg);
+        FillRect(mem, &RECT { left: 0, top: 0, right: W, bottom: height() }, bg);
         DeleteObject(bg as HGDIOBJ);
         SetBkMode(mem, TRANSPARENT as i32);
 
@@ -286,7 +304,11 @@ fn on_paint(hwnd: HWND) {
             mem,
             f_text,
             c.muted,
-            "Tus notas viven en el escritorio. Creá una con un clic en el ícono de la bandeja, con Ctrl+N, o con clic derecho en el escritorio.",
+            if crate::app::packaged() {
+                "Tus notas viven en el escritorio. Creá una con un clic en el ícono de la bandeja o con Ctrl+N."
+            } else {
+                "Tus notas viven en el escritorio. Creá una con un clic en el ícono de la bandeja, con Ctrl+N, o con clic derecho en el escritorio."
+            },
             RECT { left: PAD, top: PAD + 66, right: W - PAD, bottom: ROWS_TOP - 30 },
             DT_WORDBREAK | DT_LEFT,
         );
@@ -296,13 +318,14 @@ fn on_paint(hwnd: HWND) {
         GdipCreateFromHDC(mem, &mut g);
         GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
 
-        let rows = [
+        let all = [
             (Hit::Autostart, "Iniciar Simpcky con Windows", autostart),
             (Hit::DesktopMenu, "\"Nueva nota\" en el clic derecho del escritorio", desktop_menu),
             (Hit::Dark, "Modo oscuro", dark),
             (Hit::AutoUpdate, "Buscar actualizaciones automáticamente", crate::update::is_auto()),
         ];
-        for (i, (hit, label, on)) in rows.iter().enumerate() {
+        let shown = all.iter().filter(|(hit, ..)| rows().contains(hit));
+        for (i, (hit, label, on)) in shown.enumerate() {
             let r = row_rect(i as i32);
             if hover == *hit {
                 round_rect(g, &RECT { left: r.left - 10, top: r.top + 2, right: r.right + 10, bottom: r.bottom - 2 }, 8, argb(0xff, c.surface));
@@ -349,7 +372,7 @@ fn on_paint(hwnd: HWND) {
             DeleteObject(pen as HGDIOBJ);
         }
 
-        BitBlt(hdc, 0, 0, W, H, mem, 0, 0, SRCCOPY);
+        BitBlt(hdc, 0, 0, W, height(), mem, 0, 0, SRCCOPY);
         SelectObject(mem, old_bmp);
         DeleteObject(bmp as HGDIOBJ);
         DeleteDC(mem);

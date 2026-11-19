@@ -182,14 +182,21 @@ fn rows(cw: i32) -> Vec<(Row, RECT)> {
         (Row::Label("Escala de las notas"), 28),
         (Row::Segments(Choice::Scale), SEGMENTS_H),
         (Row::Hint(""), 10),
-        (Row::Section("WINDOWS"), SECTION_H),
-        (Row::Switch(Hit::Autostart, "Iniciar con Windows", crate::shell::is_autostart_enabled()), ROW_H),
-        (Row::Switch(Hit::DesktopMenu, "\"Nueva nota\" en el clic derecho del escritorio", desktop_menu), ROW_H),
-        (Row::Section("ACTUALIZACIONES"), SECTION_H),
-        (update, ROW_H),
-        (Row::Switch(Hit::AutoUpdate, "Buscar automáticamente", crate::update::is_auto()), ROW_H),
-        (Row::Link(Hit::Privacy, "Política de privacidad"), 40),
     ]);
+    // En la tienda, el inicio con Windows lo maneja el paquete (Configuración →
+    // Aplicaciones → Inicio), el menú del escritorio no se puede registrar y
+    // las actualizaciones las baja la tienda.
+    if !crate::app::packaged() {
+        list.extend([
+            (Row::Section("WINDOWS"), SECTION_H),
+            (Row::Switch(Hit::Autostart, "Iniciar con Windows", crate::shell::is_autostart_enabled()), ROW_H),
+            (Row::Switch(Hit::DesktopMenu, "\"Nueva nota\" en el clic derecho del escritorio", desktop_menu), ROW_H),
+            (Row::Section("ACTUALIZACIONES"), SECTION_H),
+            (update, ROW_H),
+            (Row::Switch(Hit::AutoUpdate, "Buscar automáticamente", crate::update::is_auto()), ROW_H),
+        ]);
+    }
+    list.push((Row::Link(Hit::Privacy, "Política de privacidad"), 40));
     let mut y = 4;
     list.into_iter()
         .map(|(row, h)| {

@@ -170,7 +170,8 @@ fn auto_enabled() -> bool {
 }
 
 pub fn on_startup() {
-    if !is_dev_build() && auto_enabled() {
+    // En la tienda actualiza la tienda: una MSIX no puede actualizarse sola.
+    if !is_dev_build() && !crate::app::packaged() && auto_enabled() {
         unsafe { SetTimer(controller(), TIMER_UPDATE_CHECK, FIRST_CHECK_MS, None) };
     }
 }

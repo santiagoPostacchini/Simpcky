@@ -131,10 +131,10 @@ fn main() {
     // Integración con el shell. Se reescribe en cada arranque a
     // propósito: si el .exe cambió de carpeta, las rutas se corrigen
     // solas.
-    if !app::is_test_instance() && settings.desktop_menu {
+    if !app::is_test_instance() && !app::packaged() && settings.desktop_menu {
         shell::register_desktop_menu();
     }
-    if !app::is_test_instance() { shell::refresh_autostart_path(); }
+    if !app::is_test_instance() && !app::packaged() { shell::refresh_autostart_path(); }
 
     note::load_richedit_library();
     note::register_class(hinstance);
